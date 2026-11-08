@@ -455,6 +455,17 @@ def test_apply_key_backup_writes_config_and_clears_every_widget_alias():
     assert FAKE_STREAMLIT.session_state == {"video_subject": "untouched"}
 
 
+def test_key_backup_includes_selected_providers_with_credentials():
+    """设备恢复时必须同时记住当前大模型和素材来源，否则 Key 在却选错了 Provider。"""
+    sections = _sample_config_sections()
+    sections["app"]["llm_provider"] = "openai"
+    sections["app"]["video_source"] = "pexels"
+    backup = collect_key_backup(sections)
+
+    assert backup["app"]["llm_provider"] == "openai"
+    assert backup["app"]["video_source"] == "pexels"
+
+
 def test_credential_config_key_detection_covers_project_naming():
     assert is_credential_config_key("openai_api_key")
     assert is_credential_config_key("pexels_api_keys")

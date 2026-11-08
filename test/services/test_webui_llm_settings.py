@@ -578,6 +578,30 @@ def test_kimi_poll_slow_down_and_cancel_do_not_busy_loop():
         assert poll.call_count == 1
 
 
+def test_llm_reconnect_restores_saved_key_instead_of_clearing_it():
+    """手机重连重放空密码框时，已保存的大模型 Key 仍应保留并回填到输入框。"""
+    app_config = dict(
+        config.app,
+        llm_provider="moonshot",
+        moonshot_api_key="saved-moonshot-key",
+    )
+    with (
+        patch.object(config, "app", app_config),
+        patch.object(config, "ui", dict(config.ui, language="en")),
+        patch.object(config, "try_save_config", return_value=True),
+    ):
+        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=60)
+        app.session_state["ui_language"] = "en"
+        app.session_state["settings_dialog_open"] = True
+        app.session_state["settings_dialog_target_tab"] = "llm"
+        app.session_state["moonshot_api_key_input"] = ""
+        app.run()
+
+    assert app_config["moonshot_api_key"] == "saved-moonshot-key"
+    assert app.session_state["moonshot_api_key_input"] == "saved-moonshot-key"
+    assert [str(item.value) for item in app.exception] == []
+
+
 def test_kimi_login_does_not_prepare_links_on_other_settings_tabs():
     """打开素材设置时不申请无关的授权码。"""
     app_config = {

@@ -76,6 +76,12 @@ from app.utils.logging_utils import (
 )
 from app.utils import utils
 from app.utils.request_logging import trace_http_call
+from webui.device_key_store import (
+    is_blank_value as _is_blank_secret_value,
+    is_credential_key as _is_secret_config_key,
+    keys_to_apply as _device_keys_to_apply,
+    render_device_key_store,
+)
 
 st.set_page_config(
     page_title="MoneyPrinterTurbo",
@@ -308,7 +314,9 @@ CREDENTIAL_COMPANION_KEYS = {
 }
 
 NON_LLM_COMPANION_KEYS = {
-    "app": ("upload_post_username",)
+    # 选中的大模型和素材来源必须和密钥一起记住，否则设备恢复后 Key 还在，
+    # 界面却回到默认 Provider，看起来像是还要重新填写。
+    "app": ("upload_post_username", "llm_provider", "video_source"),
 }
 # 同一个密钥在不同面板可能使用各自的控件 key：音频面板直接编辑 Gemini 和
 # MiMo 的 LLM 密钥。恢复备份时必须清除每一个别名，否则遗留的旧值
@@ -333,7 +341,19 @@ def _set_runtime_config(section_name, key, value):
     后台任务结束前，配置层只保留同一配置项的最新值；任务释放配置锁时会自动
     应用并保存。页面控件值仍由 Streamlit session_state 维护，因此暂存期间的
     rerun 不会把用户刚输入的内容重置为旧配置。
+
+    密码控件在手机浏览器重连时可能重放空值。凭据配置项遇到空值且当前已有保存
+    值时忽略这次写入，避免用户下次打开应用时必须重新填写 API Key。
     """
+    if _is_secret_config_key(key) and _is_blank_secret_value(value):
+        config_section = _RUNTIME_CONFIG_SECTIONS[section_name]
+        existing = config.snapshot_config_with_pending(config_section).get(key)
+        if not _is_blank_secret_value(existing):
+            logger.debug(
+                "ignored empty credential overwrite: "
+                f"section={section_name}, key={key}"
+            )
+            return False
     config_section = _RUNTIME_CONFIG_SECTIONS[section_name]
     updated = config.update_config_nonblocking(config_section, key, value)
     if not updated:
@@ -3057,8 +3077,8 @@ def _get_material_api_keys(config_key):
 
 
 def _save_material_api_keys(config_key, value):
-    """保存逗号分隔的素材 API Key，并允许用户显式清空旧配置。"""
-    normalized_value = value.replace(" ", "")
+    """保存逗号分隔的素材 API Key。空密码重放不会覆盖已经保存的值。"""
+    normalized_value = str(value or "").replace(" ", "")
     _set_runtime_config(
         "app",
         config_key,
@@ -3431,6 +3451,79 @@ def _apply_key_backup(restored_keys):
         if str(cache_key).startswith("elevenlabs_voices_"):
             del st.session_state[cache_key]
     return restored_count
+
+
+def _format_secret_widget_value(value):
+    """把已保存的密钥格式化为密码输入框可回填的文本。"""
+    normalized = _normalize_backup_value(value)
+    if normalized is None:
+        return ""
+    if isinstance(normalized, list):
+        return ", ".join(normalized)
+    return str(normalized)
+
+
+def _restore_secret_widgets_from_config():
+    """
+    浏览器重连时把空密码控件恢复成已经保存的 API Key。
+
+    Streamlit 会把密码框的空状态写进 session_state，且该值优先于控件的
+    value 参数。如果不先回填，用户下次打开应用会看到空白输入框，误以为
+    还要重新填写。
+    """
+    for section_name, section in _RUNTIME_CONFIG_SECTIONS.items():
+        snapshot = config.snapshot_config_with_pending(section)
+        for key, value in snapshot.items():
+            if not _is_credential_config_key(key):
+                continue
+            configured_text = _format_secret_widget_value(value)
+            if not configured_text:
+                continue
+            for widget_key in _credential_widget_state_keys(section_name, key):
+                if widget_key not in st.session_state:
+                    continue
+                entered = str(st.session_state.get(widget_key, "") or "").strip()
+                if not entered:
+                    st.session_state[widget_key] = configured_text
+
+
+def _sync_device_remembered_keys():
+    """
+    把当前 API Key 记住在这台设备上，并在服务器丢失配置时自动恢复。
+
+    手机把网页装到主屏幕后，localStorage 仍属于该站点。Render 免费实例休眠
+    或容器重建会丢掉 config.toml；下次打开应用时从本机恢复，不必重新输入。
+    """
+    current_backup = _collect_key_backup(_RUNTIME_CONFIG_SECTIONS)
+    payload_to_save = None
+    if _count_backup_keys(current_backup) > 0:
+        payload_to_save = _build_key_backup_payload(
+            _RUNTIME_CONFIG_SECTIONS, config.project_version
+        )
+    result = render_device_key_store(payload_to_save)
+    if st.session_state.get("device_keys_applied"):
+        return
+    if not isinstance(result, dict) or not result.get("ready"):
+        return
+    st.session_state["device_keys_applied"] = True
+    stored_payload = result.get("payload")
+    if not isinstance(stored_payload, dict):
+        return
+    try:
+        restored = _parse_key_backup(
+            json.dumps(stored_payload).encode("utf-8"),
+            _RUNTIME_CONFIG_SECTIONS,
+        )
+    except Exception as exc:
+        logger.warning(f"ignored invalid device key store: {exc}")
+        return
+    to_apply = _device_keys_to_apply(restored, current_backup)
+    if not to_apply:
+        return
+    restored_count = _apply_key_backup(to_apply)
+    _save_runtime_config()
+    logger.info(f"restored keys from this device: count={restored_count}")
+    st.session_state["device_keys_restored_count"] = restored_count
 
 
 def _apply_pending_settings_preset():
@@ -9703,7 +9796,12 @@ def _render_generation_controls(
 
 def _render_application():
     """按固定顺序渲染顶部栏、弹窗、生成表单和任务结果。"""
+    _sync_device_remembered_keys()
+    _restore_secret_widgets_from_config()
     _render_top_bar()
+    restored_count = st.session_state.pop("device_keys_restored_count", None)
+    if restored_count:
+        st.toast(tr("Device Keys Restored").format(count=restored_count))
 
     if st.session_state.get("settings_dialog_open", False):
         _render_settings_dialog()

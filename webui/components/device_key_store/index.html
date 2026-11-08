@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 0;
+        overflow: hidden;
+      }
+    </style>
+  </head>
+  <body>
+    <script>
+      const STORAGE_KEY = "moneyprinterturbo.device-keys.v1";
+
+      function sendMessageToStreamlit(type, data) {
+        window.parent.postMessage(
+          Object.assign({ isStreamlitMessage: true, type: type }, data),
+          "*"
+        );
+      }
+
+      function setFrameHeight() {
+        sendMessageToStreamlit("streamlit:setFrameHeight", { height: 0 });
+      }
+
+      function setComponentValue(value) {
+        sendMessageToStreamlit("streamlit:setComponentValue", { value: value });
+      }
+
+      function readStore() {
+        try {
+          const raw = window.localStorage.getItem(STORAGE_KEY);
+          if (!raw) {
+            return null;
+          }
+          const parsed = JSON.parse(raw);
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+            return null;
+          }
+          return parsed;
+        } catch (error) {
+          return null;
+        }
+      }
+
+      function writeStore(payload) {
+        if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+          return;
+        }
+        try {
+          window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+        } catch (error) {
+          // Private mode and quota errors must not wipe a previous copy.
+        }
+      }
+
+      window.addEventListener("message", function (event) {
+        const data = event.data;
+        if (!data || data.type !== "streamlit:render") {
+          return;
+        }
+        const args = data.args || {};
+        if (args.payload_to_save) {
+          writeStore(args.payload_to_save);
+        }
+        setComponentValue({ ready: true, payload: readStore() });
+        setFrameHeight();
+      });
+
+      sendMessageToStreamlit("streamlit:componentReady", { apiVersion: 1 });
+      setFrameHeight();
+    </script>
+  </body>
+</html>
