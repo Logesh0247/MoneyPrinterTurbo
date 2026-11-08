@@ -39,7 +39,7 @@
     "Login": "Login",
     "Login Error": "Login Error",
     "Incorrect username or password": "Incorrect username or password",
-    "Auth Welcome Help": "Create an account or sign in. This device will remember you, so you will not be asked again the next time you open the app.",
+    "Auth Welcome Help": "Sign in or create an account. Your browser can remember your session, but you may need to sign in again after it expires or the server is reset.",
     "Continue with Google": "Continue with Google",
     "Continue with GitHub": "Continue with GitHub",
     "Auth Or Email": "or use email",

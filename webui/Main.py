@@ -3588,69 +3588,70 @@ def _apply_saved_user_keys(user_id):
 
 
 def _sync_device_remembered_keys():
-    """
-    把当前账号、会话和 API Key 记住在这台设备上，并在服务器丢失配置时自动恢复。
+    """Read the browser vault before writing; never send server keys pre-login.
 
-    手机把网页装到主屏幕后，localStorage 仍属于该站点。Render 免费实例休眠
-    或容器重建会丢掉 config.toml 和账号文件；下次打开应用时从本机恢复登录
-    状态和密钥，不必重新注册或填写。
+    This legacy browser backup contains plaintext credentials and is suitable
+    only for a trusted, protected single-user deployment. Render environment
+    variables are preferred for persistent host-managed keys.
     """
-    current_backup = _collect_key_backup(_RUNTIME_CONFIG_SECTIONS)
-    keys_payload = None
-    if _count_backup_keys(current_backup) > 0:
-        keys_payload = _build_key_backup_payload(
-            _RUNTIME_CONFIG_SECTIONS, config.project_version
-        )
     signed_in = webui_auth.current_user()
-    if signed_in and keys_payload:
-        user_accounts.update_user_keys(signed_in["id"], keys_payload.get("keys") or {})
-
     signed_out = bool(st.session_state.get("signed_out"))
     clear_cookie = bool(st.session_state.get("clear_session_cookie"))
-    account = None if signed_out else st.session_state.get("device_account")
-    token = "" if signed_out or clear_cookie else st.session_state.get("session_token")
-    vault_to_save = build_device_vault(
-        account=account,
-        session_token=token,
-        keys_backup=keys_payload,
-        replace=signed_out,
-    )
+
     if signed_out or clear_cookie:
-        result = render_device_key_store(vault_to_save, session_token="")
+        empty = build_device_vault(replace=True) if signed_out else None
+        result = render_device_key_store(empty, session_token="")
         st.session_state.pop("clear_session_cookie", None)
-    elif token:
-        result = render_device_key_store(vault_to_save, session_token=token)
+    elif not signed_in or st.session_state.get("device_key_values_user") != signed_in.get("id"):
+        # A read must happen before *any* writes: companion defaults or a new
+        # session token must not overwrite the previous browser backup.
+        result = render_device_key_store()
     else:
-        result = render_device_key_store(vault_to_save)
+        current_backup = _collect_key_backup(_RUNTIME_CONFIG_SECTIONS)
+        keys_payload = (
+            _build_key_backup_payload(_RUNTIME_CONFIG_SECTIONS, config.project_version)
+            if _count_backup_keys(current_backup) > 0 else None
+        )
+        if keys_payload:
+            user_accounts.update_user_keys(signed_in["id"], keys_payload.get("keys") or {})
+        token = st.session_state.get("session_token")
+        # Never send password hashes or salts in browser storage.
+        account = signed_in
+        vault_to_save = build_device_vault(
+            account=account, session_token=token, keys_backup=keys_payload
+        )
+        result = (render_device_key_store(vault_to_save, session_token=token)
+                  if token else render_device_key_store(vault_to_save))
 
     if not isinstance(result, dict) or not result.get("ready"):
         return {"ready": False, "vault": None}
     st.session_state["device_keys_applied"] = True
     account, stored_token, keys_backup = unwrap_device_payload(result.get("payload"))
-    vault = {
-        "account": account,
-        "session_token": stored_token,
-        "keys_backup": keys_backup,
-    }
-    if st.session_state.get("device_key_values_applied"):
+    vault = {"account": account, "session_token": stored_token, "keys_backup": keys_backup}
+    if (not signed_in or signed_out
+            or st.session_state.get("device_key_values_user") == signed_in.get("id")):
         return {"ready": True, "vault": vault}
-    st.session_state["device_key_values_applied"] = True
-    if not isinstance(keys_backup, dict):
-        return {"ready": True, "vault": vault}
-    try:
-        restored = _parse_key_backup(
-            json.dumps(keys_backup).encode("utf-8"),
-            _RUNTIME_CONFIG_SECTIONS,
-        )
-    except Exception as exc:
-        logger.warning(f"ignored invalid device key store: {exc}")
-        return {"ready": True, "vault": vault}
-    to_apply = _device_keys_to_apply(restored, current_backup)
-    if to_apply:
-        restored_count = _apply_key_backup(to_apply)
-        _save_runtime_config()
-        logger.info(f"restored keys from this device: count={restored_count}")
-        st.session_state["device_keys_restored_count"] = restored_count
+
+    # Never restore one account's browser keys into a different account.
+    st.session_state["device_key_values_user"] = signed_in.get("id")
+    if (isinstance(account, dict) and account.get("id") == signed_in.get("id")
+            and isinstance(keys_backup, dict)):
+        try:
+            restored = _parse_key_backup(
+                json.dumps(keys_backup).encode("utf-8"), _RUNTIME_CONFIG_SECTIONS
+            )
+        except Exception as exc:
+            logger.warning(f"ignored invalid device key store: {type(exc).__name__}")
+        else:
+            current_backup = _collect_key_backup(_RUNTIME_CONFIG_SECTIONS)
+            to_apply = _device_keys_to_apply(restored, current_backup)
+            if to_apply:
+                restored_count = _apply_key_backup(to_apply)
+                _save_runtime_config()
+                logger.info(f"restored keys from this device: count={restored_count}")
+                st.session_state["device_keys_restored_count"] = restored_count
+    # Persist the signed-in account/session only after the first read completes.
+    st.rerun()
     return {"ready": True, "vault": vault}
 
 
@@ -9952,6 +9953,9 @@ def _render_application():
         elif not webui_auth.restore_session_from_device(device_state.get("vault")):
             webui_auth.render_auth_screen(tr)
             return
+        else:
+            # Run the authenticated vault read before rendering any key widgets.
+            st.rerun()
         signed_in = webui_auth.current_user()
         if signed_in and not st.session_state.get("user_keys_applied"):
             _apply_saved_user_keys(signed_in["id"])

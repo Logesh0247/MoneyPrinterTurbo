@@ -82,6 +82,8 @@ def remember_session(public_user, token, device_account=None):
 def sign_out():
     st.session_state.pop("current_user", None)
     st.session_state.pop("device_account", None)
+    st.session_state.pop("device_key_values_user", None)
+    st.session_state.pop("user_keys_applied", None)
     st.session_state["session_token"] = ""
     st.session_state["signed_out"] = True
     st.session_state["clear_session_cookie"] = True
@@ -185,13 +187,9 @@ def restore_session_from_device(vault):
             device_account = user_accounts.get_device_account(public["id"])
             remember_session(public, token, device_account)
             return True
-    account = (vault or {}).get("account")
-    if isinstance(account, dict):
-        restored = user_accounts.restore_device_account(account)
-        if restored:
-            public, token, device_account = restored
-            remember_session(public, token, device_account)
-            return True
+    # Browser storage is attacker-controlled. An account object is not proof
+    # of identity, even if it contains a password hash or names an existing
+    # user. Only a server-verified session may restore a signed-in session.
     return False
 
 
