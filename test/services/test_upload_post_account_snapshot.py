@@ -1,5 +1,6 @@
-import pytest
 """A scheduled publish belongs to the account selected at scheduling time."""
+
+import pytest
 
 import json
 import tempfile
