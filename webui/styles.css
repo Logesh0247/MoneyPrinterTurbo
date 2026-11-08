@@ -41,6 +41,15 @@ div[data-testid="stSkillsNudge"] {
     display: none !important;
 }
 
+/* Streamlit 1.66 marks widgets stale on every rerun and fragment tick, then
+   fades them (opacity ~0.33 after a 0.5s delay) until the run finishes.
+   Idle 1s/2s fragments and reconnects make the whole UI dim then flash
+   bright for no reason. Keep widgets fully opaque; the running man is hidden. */
+[data-stale="true"] {
+    opacity: 1 !important;
+    transition: none !important;
+}
+
 div[data-testid="stMainBlockContainer"] {
     padding-top: 0.5rem !important;
 }

@@ -33,6 +33,19 @@
         sendMessageToStreamlit("streamlit:setComponentValue", { value: value });
       }
 
+      // Streamlit re-sends streamlit:render on every script run. Posting the
+      // same JSON again is treated as a widget change and reruns the whole
+      // app, which then dims every stale widget. Only report a new value.
+      let lastSentValue = null;
+      function setComponentValueIfChanged(value) {
+        const serialized = JSON.stringify(value);
+        if (serialized === lastSentValue) {
+          return;
+        }
+        lastSentValue = serialized;
+        setComponentValue(value);
+      }
+
       function readStore() {
         try {
           const raw = window.localStorage.getItem(STORAGE_KEY);
@@ -95,7 +108,7 @@
             args.session_max_age
           );
         }
-        setComponentValue({ ready: true, payload: readStore() });
+        setComponentValueIfChanged({ ready: true, payload: readStore() });
         setFrameHeight();
       });
 

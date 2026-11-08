@@ -1706,10 +1706,16 @@ def _render_reviewed_youtube_publish(task_id, video_file):
                 st.error(str(exc) if isinstance(exc, review_publish.ReviewPublishError) else "Another publish attempt is already running.")
 
 
-@st.fragment(run_every="2s")
-def _render_task_manager_entry():
-    # 任务可能由当前页面或其它页面触发生成。入口单独用 fragment 定时刷新，
-    # 只更新任务数量和 popover 内容，不打断主页面表单输入。
+def _task_manager_needs_live_refresh():
+    """空闲页面不要为任务入口启动定时 fragment。"""
+    if _active_generation_tasks():
+        return True
+    return bool(str(st.session_state.get("loomloom_run_id", "") or "").strip())
+
+
+def _render_task_manager_body():
+    # 任务可能由当前页面或其它页面触发生成。入口在有进行中的任务时用
+    # fragment 定时刷新，只更新任务数量和 popover，不打断主页面表单输入。
     task_summaries = _collect_task_summaries()
     processing_task_count = _count_processing_tasks(task_summaries)
     with st.container(key="task_manager_entry", width="content"):
@@ -1722,6 +1728,20 @@ def _render_task_manager_entry():
             ),
         ):
             _render_task_manager_panel(task_summaries)
+
+
+@st.fragment(run_every="2s")
+def _render_task_manager_entry_live():
+    _render_task_manager_body()
+
+
+def _render_task_manager_entry():
+    # Streamlit 会在 fragment 触发时把页面标成 stale，0.5 秒后淡到半透明，
+    # 跑完又突然变亮。没有进行中的任务时只渲染一次，避免空闲闪烁。
+    if _task_manager_needs_live_refresh():
+        _render_task_manager_entry_live()
+    else:
+        _render_task_manager_body()
 
 
 def _load_task_restore_payload(task_id):
@@ -2045,17 +2065,6 @@ def _render_brand(available_update: str | None = None):
     )
 
 
-@st.fragment(run_every="1s")
-def _render_pending_version_check():
-    """检查未完成时只刷新品牌区域，避免阻塞或反复执行整页表单。"""
-    snapshot = version_checker.poll_available_update(config.project_version)
-    if snapshot.complete:
-        # 检查完成后刷新一次整页，让顶部栏改为静态渲染并停止 fragment 轮询。
-        # 该刷新发生在后台请求完成之后，不会延迟初始页面的其它内容。
-        st.rerun(scope="app")
-    _render_brand()
-
-
 def _render_top_bar():
     """渲染品牌、任务管理、设置和语言切换组成的页面顶部栏。"""
     # 顶部栏分为品牌区和操作区两个独立区域。窄屏下由 Streamlit
@@ -2068,11 +2077,12 @@ def _render_top_bar():
         )
 
     with brand_col:
+        # 版本检查在后台线程完成。不要用 1 秒 fragment 轮询后再整页 rerun：
+        # 那会让空闲界面周期性变暗再变亮。徽章随下一次普通交互出现即可。
         update_snapshot = version_checker.poll_available_update(config.project_version)
-        if update_snapshot.complete:
-            _render_brand(update_snapshot.available_version)
-        else:
-            _render_pending_version_check()
+        _render_brand(
+            update_snapshot.available_version if update_snapshot.complete else None
+        )
 
     with actions_col:
         with st.container(
