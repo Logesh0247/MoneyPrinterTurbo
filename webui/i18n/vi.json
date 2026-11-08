@@ -418,6 +418,8 @@
     "OpenAI Image API Key": "Khóa API ảnh tương thích OpenAI",
     "OpenAI Image Model": "Mô hình ảnh tương thích OpenAI",
     "Please Configure the OpenAI Image Source": "Vui lòng cấu hình **URL cơ sở** và **Mô hình** cho nguồn ảnh tương thích OpenAI (**Khóa API** tùy chọn cho cổng kết nối cục bộ)",
+    "Save API Settings": "Lưu khóa API và mô hình",
+    "API Settings Saved": "Đã lưu khóa API và mô hình.",
     "Video Encoder": "Bộ Mã Hóa Video",
     "Material Concurrency": "Xử lý song song video có sẵn",
     "Material Concurrency Help": "Chỉ áp dụng cho việc tìm kiếm và tải video từ Pexels, Pixabay và Coverr. Mặc định là 1 (tuần tự); tăng giá trị có thể nhanh hơn nhưng dễ chạm giới hạn của nhà cung cấp.",

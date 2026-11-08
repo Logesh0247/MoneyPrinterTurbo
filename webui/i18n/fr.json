@@ -418,6 +418,8 @@
     "OpenAI Image API Key": "Clé API d'image compatible OpenAI",
     "OpenAI Image Model": "Modèle d'image compatible OpenAI",
     "Please Configure the OpenAI Image Source": "Veuillez configurer l'**URL de base** et le **modèle** de la source d'images compatible OpenAI (**clé API** facultative pour les passerelles locales)",
+    "Save API Settings": "Enregistrer la clé API et le modèle",
+    "API Settings Saved": "Clé API et modèle enregistrés.",
     "Video Encoder": "Encodeur vidéo",
     "Material Concurrency": "Parallélisme des vidéos de stock",
     "Material Concurrency Help": "Recherches et téléchargements simultanés pour Pexels, Pixabay et Coverr uniquement. Valeur par défaut : 1 (séquentiel) ; des valeurs plus élevées peuvent accélérer le traitement, mais atteindre les limites du fournisseur.",

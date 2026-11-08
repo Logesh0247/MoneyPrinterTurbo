@@ -418,6 +418,8 @@
     "OpenAI Image API Key": "Clau API del servei d'imatges compatible amb OpenAI",
     "OpenAI Image Model": "Model d'imatges compatible amb OpenAI",
     "Please Configure the OpenAI Image Source": "Configura l'**URL base** i el **model** del servei d'imatges compatible amb OpenAI (la **clau API** és opcional per a les passarel·les locals)",
+    "Save API Settings": "Desa la clau i el model de l'API",
+    "API Settings Saved": "S'ha desat la clau i el model de l'API.",
     "Video Encoder": "Codificador de vídeo",
     "Material Concurrency": "Concurrència de vídeos d'arxiu",
     "Material Concurrency Help": "Cerques i descàrregues simultànies només per a Pexels, Pixabay i Coverr. El valor predeterminat és 1 (seqüencial); valors més alts poden accelerar el procés, però activar límits del proveïdor.",

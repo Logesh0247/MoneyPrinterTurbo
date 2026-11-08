@@ -418,6 +418,8 @@
     "OpenAI Image API Key": "OpenAI ilə uyğun şəkil xidmətinin API açarı",
     "OpenAI Image Model": "OpenAI ilə uyğun şəkil modeli",
     "Please Configure the OpenAI Image Source": "OpenAI ilə uyğun şəkil mənbəyi üçün **əsas URL** və **model** konfiqurasiya edilməlidir (lokal şlüzlər üçün **API açarı** istəyə bağlıdır)",
+    "Save API Settings": "API açarını və modeli yadda saxla",
+    "API Settings Saved": "API açarı və model yadda saxlandı.",
     "Video Encoder": "Video kodlayıcısı",
     "Material Concurrency": "Hazır videoların paralelliyi",
     "Material Concurrency Help": "Yalnız Pexels, Pixabay və Coverr üzrə axtarış və yükləmələrə aiddir. İlkin dəyər 1-dir (ardıcıl); daha yüksək dəyərlər işi sürətləndirə bilər, lakin provayder limitlərinə səbəb ola bilər.",
