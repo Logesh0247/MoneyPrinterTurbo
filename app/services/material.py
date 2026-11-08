@@ -221,6 +221,8 @@ def _get_tls_verify() -> bool:
 
 def get_api_key(cfg_key: str):
     api_keys = config.app.get(cfg_key)
+    if not api_keys and cfg_key == "pixabay_api_keys":
+        api_keys = os.getenv("PIXABAY_API_KEY", "").strip()
     if not api_keys:
         raise ValueError(
             f"\n\n##### {cfg_key} is not set #####\n\n"
@@ -1671,9 +1673,14 @@ def _request_openai_image(endpoint: str, payload: dict) -> tuple[bytes | None, s
     else:
         configured_keys = []
 
+    # A deployment key must never be sent to a user-configurable gateway.
+    env_key = ""
+    if not configured_keys and endpoint.rstrip("/") == "https://api.openai.com/v1/images/generations":
+        env_key = os.getenv("OPENAI_IMAGE_API_KEY", "").strip()
+
     failure_detail = "no request attempt was made"
     for attempt in range(1, OPENAI_IMAGE_MAX_ATTEMPTS + 1):
-        api_key = get_api_key("openai_image_api_keys") if configured_keys else ""
+        api_key = get_api_key("openai_image_api_keys") if configured_keys else env_key
         headers = {}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"

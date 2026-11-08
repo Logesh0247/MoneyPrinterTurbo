@@ -616,12 +616,16 @@ def generate_audio(
         if voxcpm_prompt_audio is not None:
             tts_kwargs["voxcpm_prompt_audio"] = voxcpm_prompt_audio
             tts_kwargs["voxcpm_prompt_text"] = voxcpm_prompt_text
+        voice.clear_tts_failure_hint()
         sub_maker = voice.tts(**tts_kwargs)
         if sub_maker is None:
             _mark_task_failed(
                 task_id,
                 "audio",
-                "failed to synthesize audio; verify the selected voice and TTS connectivity",
+                voice.get_tts_failure_hint() or (
+                    "failed to synthesize audio; verify the selected voice, provider settings, "
+                    "and TTS connectivity; inspect the hosting logs for details"
+                ),
             )
             return None, None, None
         # Measure the real written audio_file, not sub_maker.cues[-1].end:

@@ -16,6 +16,7 @@ import time
 import unicodedata
 import wave
 from datetime import timedelta
+from contextvars import ContextVar
 from typing import Union
 from urllib.parse import urlparse
 from xml.sax.saxutils import escape, unescape
@@ -35,6 +36,54 @@ from app.services import bgm
 from app.utils import utils
 from app.utils.subtitle_reader import moviepy_subtitles
 from app.utils.subtitle_writer import staged_subtitle_file
+
+# Scoped to each generation thread so simultaneous tasks cannot mix diagnostics.
+_tts_failure_hint = ContextVar("tts_failure_hint", default="")
+
+
+def clear_tts_failure_hint():
+    _tts_failure_hint.set("")
+
+
+def get_tts_failure_hint():
+    return _tts_failure_hint.get()
+
+
+def _edge_failure_hint(exc):
+    """Return only fixed, non-sensitive hints; never expose provider responses."""
+    status = getattr(exc, "status", None)
+    if status in (401, 403):
+        return "Edge TTS refused the connection (HTTP %s); check provider access or try another voice provider." % status
+    if status == 429:
+        return "Edge TTS is rate-limiting requests (HTTP 429); wait before trying again."
+    if isinstance(exc, TimeoutError):
+        return "Edge TTS timed out; check network access to the speech service."
+    if isinstance(exc, (ConnectionError, OSError)):
+        return "Edge TTS could not connect; check the hosting service's network access."
+    if type(exc).__name__ == "NoAudioReceived":
+        return "Edge TTS returned no audio; check the voice and speech-service availability."
+    return "Edge TTS failed; check the selected voice and hosting logs for the cause."
+
+
+def _gemini_failure_hint(exc):
+    """Classify Gemini failures without exposing request or response contents."""
+    status = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    if status in (401, 403):
+        return "Gemini TTS rejected access (HTTP %s); check the Gemini API key and model access." % status
+    if status == 429:
+        return "Gemini TTS quota or rate limit reached (HTTP 429); check quota and billing before retrying."
+    if status == 404:
+        return "Gemini TTS model was not found (HTTP 404); check model availability for your account."
+    if status == 400:
+        return "Gemini TTS rejected the request (HTTP 400); check the selected voice, script and model access."
+    if isinstance(status, int) and 500 <= status <= 599:
+        return "Gemini TTS service is unavailable (HTTP %s); try again later." % status
+    if isinstance(exc, TimeoutError):
+        return "Gemini TTS timed out; check network access and try again."
+    if isinstance(exc, (ConnectionError, OSError)):
+        return "Gemini TTS could not connect; check the hosting service's network access."
+    return "Gemini TTS failed; check the Gemini key, voice, quota and hosting logs."
+
 
 _DEFAULT_EDGE_TTS_TIMEOUT_SECONDS = 30.0
 _SILICONFLOW_TTS_TIMEOUT_SECONDS = (10, 300)  # connect, read
@@ -1037,22 +1086,23 @@ def _tts_with_pauses(
             if seg_type == "pause":
                 pause_duration = float(seg_val)
                 silence_wav = os.path.join(temp_dir, f"silence_{idx}.wav")
-                num_silent_samples = int(round(pause_duration * SAMPLE_RATE))
-                with wave.open(silence_wav, "wb") as wf:
-                    wf.setnchannels(1)
-                    wf.setsampwidth(2)
-                    wf.setframerate(SAMPLE_RATE)
-                    wf.writeframes(b"\x00\x00" * num_silent_samples)
-
-                # 同样触发 generate_silent_audio，保证单测中若 mock 了该方法依然能被捕获调用
-                generate_silent_audio(pause_duration, silence_wav)
-
-                actual_pause_duration = pause_duration
-                # 如果单测 mock 了 get_audio_duration，优先读取 mock 实际返回的时长
-                mock_check_duration = get_audio_duration(silence_wav)
-                if mock_check_duration > 0 and abs(mock_check_duration - pause_duration) > 0.05:
-                    actual_pause_duration = mock_check_duration
-                    num_silent_samples = int(round(actual_pause_duration * SAMPLE_RATE))
+                # Generate the PCM WAV once and read its header directly. This
+                # avoids opening a separate FFmpeg process just to time silence.
+                if not generate_silent_audio(pause_duration, silence_wav):
+                    logger.error("failed to generate silence for narration pause")
+                    return None
+                try:
+                    with wave.open(silence_wav, "rb") as wf:
+                        if wf.getframerate() != SAMPLE_RATE:
+                            logger.error("narration pause has an unexpected sample rate")
+                            return None
+                        num_silent_samples = wf.getnframes()
+                except (OSError, EOFError, wave.Error):
+                    logger.error("failed to read narration pause audio")
+                    return None
+                if num_silent_samples <= 0:
+                    logger.error("narration pause audio is empty")
+                    return None
 
                 audio_chunk_files.append(silence_wav)
                 cumulative_samples += num_silent_samples
@@ -1166,6 +1216,7 @@ def tts(
     voxcpm_prompt_audio: bytes | None = None,
     voxcpm_prompt_text: str = "",
 ) -> Union[SubMaker, None]:
+    clear_tts_failure_hint()
     # Emoji are not narrated: Edge TTS reads their names aloud ("chart
     # increasing"), and each one gets its own word boundary.
     narration = utils.remove_emoji(text)
@@ -1629,10 +1680,12 @@ def azure_tts_v1(
             # Edge can finish a stream with timing events but no audio payload.
             # Those events produce a nonempty SRT, yet the MP3 is unplayable.
             if os.path.getsize(temp_path) == 0:
+                _tts_failure_hint.set("Edge TTS returned no audio; check the voice and speech-service availability.")
                 logger.warning("failed, edge tts stream contained no audio")
                 continue
 
             if not sub_maker.get_srt():
+                _tts_failure_hint.set("Edge TTS returned audio without timing data; try another voice or check the speech service.")
                 logger.warning("failed, sub_maker.get_srt() is empty")
                 continue
 
@@ -1640,9 +1693,11 @@ def azure_tts_v1(
             # Failed retries must not replace previously successful narration.
             os.replace(temp_path, voice_file)
             temp_path = None
+            clear_tts_failure_hint()
             logger.info(f"completed, output file: {voice_file}")
             return sub_maker
         except Exception as e:
+            _tts_failure_hint.set(_edge_failure_hint(e))
             logger.error(f"failed, error: {str(e)}")
         finally:
             if temp_path is not None:
@@ -1996,6 +2051,7 @@ def gemini_tts(
     try:
         api_key = config.app.get("gemini_api_key", "")
         if not api_key:
+            _tts_failure_hint.set("Gemini TTS needs a Gemini API key in Audio Settings; OpenRouter and image keys are not Gemini keys.")
             logger.error("Gemini API key is not set")
             return None
 
@@ -2033,6 +2089,7 @@ def gemini_tts(
                 break
                 
         if not audio_data:
+            _tts_failure_hint.set("Gemini TTS returned no audio; check the script, voice and provider availability.")
             feedback = getattr(response, "prompt_feedback", None)
             logger.error(
                 "No audio data received from Gemini TTS: "
@@ -2063,6 +2120,7 @@ def gemini_tts(
                 sample_width=2     # 16-bit
             )
         except Exception as e:
+            _tts_failure_hint.set("Gemini TTS returned audio that could not be decoded; check the server's audio tools.")
             logger.error(f"Failed to load PCM audio: {e}")
             return None
         
@@ -2098,10 +2156,12 @@ def gemini_tts(
         return sub_maker
         
     except ImportError as e:
+        _tts_failure_hint.set("Gemini TTS dependency is missing on the server; check the deployment installation.")
         logger.error(f"Missing required package for Gemini TTS: {str(e)}. Please install: pip install pydub")
         return None
     except Exception as e:
-        logger.error(f"Gemini TTS failed, error: {str(e)}")
+        _tts_failure_hint.set(_gemini_failure_hint(e))
+        logger.error("Gemini TTS failed: {}", type(e).__name__)
         return None
 
     finally:

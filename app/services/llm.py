@@ -345,6 +345,11 @@ def _generate_response(
             provider.config_key("base_url"), ""
         )
         base_url = provider.resolve_base_url(configured_base_url)
+        # Only send the deployment-managed key to the official OpenRouter URL.
+        # Custom gateways must provide their own explicit key.
+        if (not api_key and llm_provider == "openrouter"
+                and base_url.rstrip("/") == "https://openrouter.ai/api/v1"):
+            api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
         if configured_base_url and configured_base_url.strip().rstrip("/") in {
             url.rstrip("/") for url in provider.deprecated_base_urls
         }:

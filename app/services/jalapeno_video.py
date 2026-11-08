@@ -54,6 +54,14 @@ def endpoint(settings: Mapping | None = None) -> seedance.SeedanceEndpoint:
         .strip()
         .rstrip("/")
     )
+    env_key_in_use = (
+        not str(values.get("jalapeno_video_api_key", "") or "").strip()
+        and bool(os.getenv("JALAPENO_VIDEO_API_KEY", "").strip())
+    )
+    if env_key_in_use and base not in {DEFAULT_BASE_URL, DEFAULT_TASKS_URL}:
+        raise JalapenoVideoError(
+            "JALAPENO_VIDEO_API_KEY can only be used with the official Jalapeno video endpoint"
+        )
     try:
         parts = urlsplit(base)
         # urlsplit 不会主动校验端口；这里读取一次，避免配音后才发现地址非法。

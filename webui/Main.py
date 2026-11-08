@@ -9330,8 +9330,9 @@ def _render_generation_controls(
             st.error(tr("Please Enter the Pexels API Key"))
             st.stop()
 
-        if params.video_source == "pixabay" and not config.app.get(
-            "pixabay_api_keys", ""
+        if params.video_source == "pixabay" and not (
+            config.app.get("pixabay_api_keys", "")
+            or os.getenv("PIXABAY_API_KEY", "").strip()
         ):
             _remove_active_generation_task(task_id)
             st.error(tr("Please Enter the Pixabay API Key"))
