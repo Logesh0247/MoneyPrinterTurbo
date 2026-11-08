@@ -670,6 +670,29 @@ def save_config():
 _cfg = load_config()
 diagnostics = _SynchronizedConfig(_cfg.get("diagnostics", {}))
 app = _SynchronizedConfig(_cfg.get("app", {}))
+
+def apply_host_defaults(settings, environ):
+    """Apply opt-in non-secret defaults; never copy environment keys into config."""
+    if environ.get("MPT_DEFAULT_OPENROUTER", "").strip() == "1":
+        settings["llm_provider"] = "openrouter"
+        if not settings.get("openrouter_model_name"):
+            settings["openrouter_model_name"] = "openrouter/free"
+    if environ.get("MPT_DEFAULT_PIXABAY", "").strip() == "1":
+        settings["video_source"] = "pixabay"
+    if environ.get("MPT_DEFAULT_OPENAI_IMAGE", "").strip() == "1":
+        if not settings.get("openai_image_base_url"):
+            settings["openai_image_base_url"] = "https://api.openai.com/v1"
+        # Explicitly enabling the official OpenAI image preset provides a
+        # usable starting model, but an existing/custom model always wins.
+        image_model = environ.get("MPT_OPENAI_IMAGE_MODEL", "").strip()
+        if not image_model and str(settings["openai_image_base_url"]).strip().rstrip("/") == "https://api.openai.com/v1":
+            image_model = "gpt-image-1"
+        if image_model and not settings.get("openai_image_model"):
+            settings["openai_image_model"] = image_model
+
+
+apply_host_defaults(app, os.environ)
+
 whisper = _cfg.get("whisper", {})
 proxy = _cfg.get("proxy", {})
 azure = _SynchronizedConfig(_cfg.get("azure", {}))

@@ -5,6 +5,7 @@ provider. Eligibility means configuration is present, not that a remote call wor
 """
 
 from pathlib import Path
+import os
 import shutil
 
 from app.config import config
@@ -51,6 +52,10 @@ def configured_llm_providers(settings, oauth_status):
         saved_base = _text(settings.get(provider.config_key("base_url")))
         model = provider.resolve_model_name(saved_model)
         base = provider.resolve_base_url(saved_base)
+        if (provider.provider_id == "openrouter" and not key
+                and base.rstrip("/") == "https://openrouter.ai/api/v1"
+                and os.getenv("OPENROUTER_API_KEY", "").strip()):
+            key = "configured-in-environment"
         if provider.provider_id == "ollama":
             base = base or config.get_default_ollama_base_url()
         if provider.provider_id in {"openai_codex", "openai_chatgpt", "kimi_code"}:
@@ -93,6 +98,7 @@ def configured_material_providers(settings, groups, codex_connected=False):
         provider: _has_keys(settings.get(f"{provider}_api_keys"))
         for provider in ("pexels", "pixabay", "coverr", "wavespeed")
     }
+    enabled["pixabay"] = enabled["pixabay"] or bool(os.getenv("PIXABAY_API_KEY", "").strip())
     enabled.update(
         {
             "metaso_minimax": metaso_minimax.is_enabled(settings),

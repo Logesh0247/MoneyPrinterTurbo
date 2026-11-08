@@ -794,3 +794,25 @@ not a dedicated secrets manager. Do not use production API keys or YouTube
 credentials in this preview until a secure secrets integration is implemented.
 YouTube publishing remains blocked in Safe Mode. For production, use persistent
 storage, a secrets manager, access controls and a separately managed worker.
+
+#### Optional host-managed provider keys
+
+After verifying the preview requires authentication, set replacement keys in
+Render's environment settings, not in chat or the repository. The service can
+read `OPENROUTER_API_KEY`, `PIXABAY_API_KEY`, `OPENAI_IMAGE_API_KEY`, and
+`JALAPENO_VIDEO_API_KEY` without copying their values into the editable app
+configuration. Explicit per-provider configuration takes precedence. To set
+non-secret startup defaults, use `MPT_DEFAULT_OPENROUTER=1` (OpenRouter and
+`openrouter/free` when no model was configured), `MPT_DEFAULT_PIXABAY=1`, and
+`MPT_DEFAULT_OPENAI_IMAGE=1`. The last option fills the official OpenAI image
+endpoint and `gpt-image-1` only when unset; `MPT_OPENAI_IMAGE_MODEL` can select
+another model. Verify model availability and pricing for your account. Image
+generation is a separate source selection and can incur charges.
+
+Environment-supplied OpenRouter, OpenAI Image, and Jalapeno video keys are only
+sent to their respective official endpoints; custom gateways require an
+explicitly configured key. These options do not protect an unauthenticated
+WebUI and are not a replacement for a dedicated production secrets manager.
+Render free-tier files remain ephemeral; environment settings persist across
+redeploys until changed in the Render dashboard. Neither provider access nor
+billing has been verified by this project.

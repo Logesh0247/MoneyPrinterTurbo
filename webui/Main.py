@@ -4595,6 +4595,9 @@ def _render_material_provider_settings(provider):
             args=("openai_image_api_keys", "openai_image_api_keys_input"),
         )
         _save_material_api_keys("openai_image_api_keys", openai_image_api_key)
+        if (openai_image_base_url.strip().rstrip("/") == "https://api.openai.com/v1"
+                and os.getenv("OPENAI_IMAGE_API_KEY", "").strip()):
+            st.caption("An OpenAI image key is configured on the server; it is not displayed here. A key entered above takes precedence.")
 
         openai_image_model = st.text_input(
             tr("OpenAI Image Model"),
@@ -9558,8 +9561,9 @@ def _render_generation_controls(
             st.error(tr("Please Enter the Pexels API Key"))
             st.stop()
 
-        if params.video_source == "pixabay" and not config.app.get(
-            "pixabay_api_keys", ""
+        if params.video_source == "pixabay" and not (
+            config.app.get("pixabay_api_keys", "")
+            or os.getenv("PIXABAY_API_KEY", "").strip()
         ):
             _remove_active_generation_task(task_id)
             st.error(tr("Please Enter the Pixabay API Key"))
@@ -9689,6 +9693,9 @@ def _render_generation_controls(
         ):
             _remove_active_generation_task(task_id)
             st.error(tr("Please Configure the OpenAI Image Source"))
+            st.caption(material.openai_image_configuration_issue(
+                config.snapshot_config_with_pending(config.app)
+            ))
             st.stop()
 
         loomloom_video_request = None
