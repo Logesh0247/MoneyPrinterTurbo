@@ -222,6 +222,31 @@ def test_voxcpm_settings_render_reference_audio_with_cloud_notice():
     assert [str(item.value) for item in app.exception] == []
 
 
+def test_siliconflow_reconnect_restores_saved_key_instead_of_clearing_it():
+    """主页面上的 TTS 密码框重连为空时，不能把已保存的 Key 写丢。"""
+    test_config = dict(config.siliconflow, api_key="saved-siliconflow-key")
+    test_ui = dict(
+        config.ui,
+        voice_mode="tts",
+        tts_server="siliconflow",
+        voice_name="",
+    )
+
+    with (
+        patch.object(config, "siliconflow", test_config),
+        patch.object(config, "ui", test_ui),
+        patch.object(config, "try_save_config", return_value=True),
+    ):
+        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
+        app.session_state["ui_language"] = "en"
+        app.session_state["siliconflow_api_key_input"] = ""
+        app.run()
+
+    assert test_config["api_key"] == "saved-siliconflow-key"
+    assert app.session_state["siliconflow_api_key_input"] == "saved-siliconflow-key"
+    assert [str(item.value) for item in app.exception] == []
+
+
 def test_voxcpm_reconnect_restores_saved_key_instead_of_clearing_it():
     """Streamlit 重连重放空密码状态时，VoxCPM Key 仍应保留。"""
     test_config = dict(config.voxcpm, api_key="saved-voxcpm-key")

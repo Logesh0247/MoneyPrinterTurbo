@@ -76,6 +76,16 @@ from app.utils.logging_utils import (
 )
 from app.utils import utils
 from app.utils.request_logging import trace_http_call
+from app.services import user_accounts
+from webui import auth as webui_auth
+from webui.device_key_store import (
+    build_device_vault,
+    is_blank_value as _is_blank_secret_value,
+    is_credential_key as _is_secret_config_key,
+    keys_to_apply as _device_keys_to_apply,
+    render_device_key_store,
+    unwrap_device_payload,
+)
 
 st.set_page_config(
     page_title="MoneyPrinterTurbo",
@@ -308,7 +318,9 @@ CREDENTIAL_COMPANION_KEYS = {
 }
 
 NON_LLM_COMPANION_KEYS = {
-    "app": ("upload_post_username",)
+    # 选中的大模型和素材来源必须和密钥一起记住，否则设备恢复后 Key 还在，
+    # 界面却回到默认 Provider，看起来像是还要重新填写。
+    "app": ("upload_post_username", "llm_provider", "video_source"),
 }
 # 同一个密钥在不同面板可能使用各自的控件 key：音频面板直接编辑 Gemini 和
 # MiMo 的 LLM 密钥。恢复备份时必须清除每一个别名，否则遗留的旧值
@@ -333,7 +345,19 @@ def _set_runtime_config(section_name, key, value):
     后台任务结束前，配置层只保留同一配置项的最新值；任务释放配置锁时会自动
     应用并保存。页面控件值仍由 Streamlit session_state 维护，因此暂存期间的
     rerun 不会把用户刚输入的内容重置为旧配置。
+
+    密码控件在手机浏览器重连时可能重放空值。凭据配置项遇到空值且当前已有保存
+    值时忽略这次写入，避免用户下次打开应用时必须重新填写 API Key。
     """
+    if _is_secret_config_key(key) and _is_blank_secret_value(value):
+        config_section = _RUNTIME_CONFIG_SECTIONS[section_name]
+        existing = config.snapshot_config_with_pending(config_section).get(key)
+        if not _is_blank_secret_value(existing):
+            logger.debug(
+                "ignored empty credential overwrite: "
+                f"section={section_name}, key={key}"
+            )
+            return False
     config_section = _RUNTIME_CONFIG_SECTIONS[section_name]
     updated = config.update_config_nonblocking(config_section, key, value)
     if not updated:
@@ -1682,10 +1706,16 @@ def _render_reviewed_youtube_publish(task_id, video_file):
                 st.error(str(exc) if isinstance(exc, review_publish.ReviewPublishError) else "Another publish attempt is already running.")
 
 
-@st.fragment(run_every="2s")
-def _render_task_manager_entry():
-    # 任务可能由当前页面或其它页面触发生成。入口单独用 fragment 定时刷新，
-    # 只更新任务数量和 popover 内容，不打断主页面表单输入。
+def _task_manager_needs_live_refresh():
+    """空闲页面不要为任务入口启动定时 fragment。"""
+    if _active_generation_tasks():
+        return True
+    return bool(str(st.session_state.get("loomloom_run_id", "") or "").strip())
+
+
+def _render_task_manager_body():
+    # 任务可能由当前页面或其它页面触发生成。入口在有进行中的任务时用
+    # fragment 定时刷新，只更新任务数量和 popover，不打断主页面表单输入。
     task_summaries = _collect_task_summaries()
     processing_task_count = _count_processing_tasks(task_summaries)
     with st.container(key="task_manager_entry", width="content"):
@@ -1698,6 +1728,20 @@ def _render_task_manager_entry():
             ),
         ):
             _render_task_manager_panel(task_summaries)
+
+
+@st.fragment(run_every="2s")
+def _render_task_manager_entry_live():
+    _render_task_manager_body()
+
+
+def _render_task_manager_entry():
+    # Streamlit 会在 fragment 触发时把页面标成 stale，0.5 秒后淡到半透明，
+    # 跑完又突然变亮。没有进行中的任务时只渲染一次，避免空闲闪烁。
+    if _task_manager_needs_live_refresh():
+        _render_task_manager_entry_live()
+    else:
+        _render_task_manager_body()
 
 
 def _load_task_restore_payload(task_id):
@@ -2021,17 +2065,6 @@ def _render_brand(available_update: str | None = None):
     )
 
 
-@st.fragment(run_every="1s")
-def _render_pending_version_check():
-    """检查未完成时只刷新品牌区域，避免阻塞或反复执行整页表单。"""
-    snapshot = version_checker.poll_available_update(config.project_version)
-    if snapshot.complete:
-        # 检查完成后刷新一次整页，让顶部栏改为静态渲染并停止 fragment 轮询。
-        # 该刷新发生在后台请求完成之后，不会延迟初始页面的其它内容。
-        st.rerun(scope="app")
-    _render_brand()
-
-
 def _render_top_bar():
     """渲染品牌、任务管理、设置和语言切换组成的页面顶部栏。"""
     # 顶部栏分为品牌区和操作区两个独立区域。窄屏下由 Streamlit
@@ -2044,11 +2077,12 @@ def _render_top_bar():
         )
 
     with brand_col:
+        # 版本检查在后台线程完成。不要用 1 秒 fragment 轮询后再整页 rerun：
+        # 那会让空闲界面周期性变暗再变亮。徽章随下一次普通交互出现即可。
         update_snapshot = version_checker.poll_available_update(config.project_version)
-        if update_snapshot.complete:
-            _render_brand(update_snapshot.available_version)
-        else:
-            _render_pending_version_check()
+        _render_brand(
+            update_snapshot.available_version if update_snapshot.complete else None
+        )
 
     with actions_col:
         with st.container(
@@ -2060,6 +2094,25 @@ def _render_top_bar():
             width="stretch",
         ):
             _render_task_manager_entry()
+
+            signed_in = webui_auth.current_user()
+            if signed_in:
+                st.button(
+                    signed_in.get("display_name") or signed_in.get("email") or tr("Sign Out"),
+                    key="signed_in_user_button",
+                    type="tertiary",
+                    icon=":material/account_circle:",
+                    width="content",
+                    disabled=True,
+                )
+                st.button(
+                    tr("Sign Out"),
+                    key="sign_out_button",
+                    type="secondary",
+                    icon=":material/logout:",
+                    width="content",
+                    on_click=webui_auth.sign_out,
+                )
 
             st.button(
                 tr("Settings"),
@@ -3057,8 +3110,8 @@ def _get_material_api_keys(config_key):
 
 
 def _save_material_api_keys(config_key, value):
-    """保存逗号分隔的素材 API Key，并允许用户显式清空旧配置。"""
-    normalized_value = value.replace(" ", "")
+    """保存逗号分隔的素材 API Key。空密码重放不会覆盖已经保存的值。"""
+    normalized_value = str(value or "").replace(" ", "")
     _set_runtime_config(
         "app",
         config_key,
@@ -3431,6 +3484,124 @@ def _apply_key_backup(restored_keys):
         if str(cache_key).startswith("elevenlabs_voices_"):
             del st.session_state[cache_key]
     return restored_count
+
+
+def _format_secret_widget_value(value):
+    """把已保存的密钥格式化为密码输入框可回填的文本。"""
+    normalized = _normalize_backup_value(value)
+    if normalized is None:
+        return ""
+    if isinstance(normalized, list):
+        return ", ".join(normalized)
+    return str(normalized)
+
+
+def _restore_secret_widgets_from_config():
+    """
+    浏览器重连时把空密码控件恢复成已经保存的 API Key。
+
+    Streamlit 会把密码框的空状态写进 session_state，且该值优先于控件的
+    value 参数。如果不先回填，用户下次打开应用会看到空白输入框，误以为
+    还要重新填写。
+    """
+    for section_name, section in _RUNTIME_CONFIG_SECTIONS.items():
+        snapshot = config.snapshot_config_with_pending(section)
+        for key, value in snapshot.items():
+            if not _is_credential_config_key(key):
+                continue
+            configured_text = _format_secret_widget_value(value)
+            if not configured_text:
+                continue
+            for widget_key in _credential_widget_state_keys(section_name, key):
+                if widget_key not in st.session_state:
+                    continue
+                entered = str(st.session_state.get(widget_key, "") or "").strip()
+                if not entered:
+                    st.session_state[widget_key] = configured_text
+
+
+def _apply_saved_user_keys(user_id):
+    """Load this user's stored API keys into the running config."""
+    stored_keys = user_accounts.get_user_keys(user_id)
+    if not stored_keys:
+        return
+    current_backup = _collect_key_backup(_RUNTIME_CONFIG_SECTIONS)
+    to_apply = _device_keys_to_apply(stored_keys, current_backup)
+    if not to_apply:
+        return
+    restored_count = _apply_key_backup(to_apply)
+    _save_runtime_config()
+    if restored_count:
+        st.session_state["device_keys_restored_count"] = (
+            st.session_state.get("device_keys_restored_count", 0) + restored_count
+        )
+
+
+def _sync_device_remembered_keys():
+    """
+    把当前账号、会话和 API Key 记住在这台设备上，并在服务器丢失配置时自动恢复。
+
+    手机把网页装到主屏幕后，localStorage 仍属于该站点。Render 免费实例休眠
+    或容器重建会丢掉 config.toml 和账号文件；下次打开应用时从本机恢复登录
+    状态和密钥，不必重新注册或填写。
+    """
+    current_backup = _collect_key_backup(_RUNTIME_CONFIG_SECTIONS)
+    keys_payload = None
+    if _count_backup_keys(current_backup) > 0:
+        keys_payload = _build_key_backup_payload(
+            _RUNTIME_CONFIG_SECTIONS, config.project_version
+        )
+    signed_in = webui_auth.current_user()
+    if signed_in and keys_payload:
+        user_accounts.update_user_keys(signed_in["id"], keys_payload.get("keys") or {})
+
+    signed_out = bool(st.session_state.get("signed_out"))
+    clear_cookie = bool(st.session_state.get("clear_session_cookie"))
+    account = None if signed_out else st.session_state.get("device_account")
+    token = "" if signed_out or clear_cookie else st.session_state.get("session_token")
+    vault_to_save = build_device_vault(
+        account=account,
+        session_token=token,
+        keys_backup=keys_payload,
+        replace=signed_out,
+    )
+    if signed_out or clear_cookie:
+        result = render_device_key_store(vault_to_save, session_token="")
+        st.session_state.pop("clear_session_cookie", None)
+    elif token:
+        result = render_device_key_store(vault_to_save, session_token=token)
+    else:
+        result = render_device_key_store(vault_to_save)
+
+    if not isinstance(result, dict) or not result.get("ready"):
+        return {"ready": False, "vault": None}
+    st.session_state["device_keys_applied"] = True
+    account, stored_token, keys_backup = unwrap_device_payload(result.get("payload"))
+    vault = {
+        "account": account,
+        "session_token": stored_token,
+        "keys_backup": keys_backup,
+    }
+    if st.session_state.get("device_key_values_applied"):
+        return {"ready": True, "vault": vault}
+    st.session_state["device_key_values_applied"] = True
+    if not isinstance(keys_backup, dict):
+        return {"ready": True, "vault": vault}
+    try:
+        restored = _parse_key_backup(
+            json.dumps(keys_backup).encode("utf-8"),
+            _RUNTIME_CONFIG_SECTIONS,
+        )
+    except Exception as exc:
+        logger.warning(f"ignored invalid device key store: {exc}")
+        return {"ready": True, "vault": vault}
+    to_apply = _device_keys_to_apply(restored, current_backup)
+    if to_apply:
+        restored_count = _apply_key_backup(to_apply)
+        _save_runtime_config()
+        logger.info(f"restored keys from this device: count={restored_count}")
+        st.session_state["device_keys_restored_count"] = restored_count
+    return {"ready": True, "vault": vault}
 
 
 def _apply_pending_settings_preset():
@@ -9703,7 +9874,29 @@ def _render_generation_controls(
 
 def _render_application():
     """按固定顺序渲染顶部栏、弹窗、生成表单和任务结果。"""
+    device_state = _sync_device_remembered_keys() or {"ready": False, "vault": None}
+    if webui_auth.auth_gate_enabled():
+        if not webui_auth.current_user():
+            webui_auth.consume_oauth_callback()
+        if webui_auth.current_user():
+            pass
+        elif not device_state.get("ready") and not st.session_state.get(
+            "device_store_waited"
+        ):
+            st.session_state["device_store_waited"] = True
+            return
+        elif not webui_auth.restore_session_from_device(device_state.get("vault")):
+            webui_auth.render_auth_screen(tr)
+            return
+        signed_in = webui_auth.current_user()
+        if signed_in and not st.session_state.get("user_keys_applied"):
+            _apply_saved_user_keys(signed_in["id"])
+            st.session_state["user_keys_applied"] = True
+    _restore_secret_widgets_from_config()
     _render_top_bar()
+    restored_count = st.session_state.pop("device_keys_restored_count", None)
+    if restored_count:
+        st.toast(tr("Device Keys Restored").format(count=restored_count))
 
     if st.session_state.get("settings_dialog_open", False):
         _render_settings_dialog()
