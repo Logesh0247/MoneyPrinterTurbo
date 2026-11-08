@@ -51,6 +51,18 @@ openai_chatgpt_timeout = ""
 # 应由 API 客户端携带请求头下载。
 api_key = ""
 
+# WebUI user accounts. Email/password sign-up always works. Google and GitHub
+# need OAuth client credentials from those providers, plus MPT_PUBLIC_URL set
+# to the public https origin (for example https://your-app.onrender.com).
+# Environment variables override these values: GOOGLE_CLIENT_ID,
+# GOOGLE_CLIENT_SECRET, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, MPT_PUBLIC_URL.
+# WebUI 用户账号。邮箱注册始终可用；Google / GitHub 需要在对应平台创建 OAuth
+# 应用，并设置 MPT_PUBLIC_URL 为站点公开地址。
+google_oauth_client_id = ""
+google_oauth_client_secret = ""
+github_oauth_client_id = ""
+github_oauth_client_secret = ""
+
 # -----------------------------------------------------------------------------
 # General / 通用设置
 # -----------------------------------------------------------------------------

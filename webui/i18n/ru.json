@@ -414,6 +414,8 @@
     "OpenAI Image API Key": "API-ключ изображений, совместимый с OpenAI",
     "OpenAI Image Model": "Модель изображений, совместимая с OpenAI",
     "Please Configure the OpenAI Image Source": "Настройте **базовый URL** и **модель** источника изображений, совместимого с OpenAI (**API-ключ** необязателен для локальных шлюзов)",
+    "Save API Settings": "Сохранить ключ API и модель",
+    "API Settings Saved": "Ключ API и модель сохранены.",
     "Video Encoder": "Видеокодер",
     "Material Concurrency": "Параллельная обработка стоковых видео",
     "Material Concurrency Help": "Одновременный поиск и загрузка только для Pexels, Pixabay и Coverr. По умолчанию 1 (последовательно); большее значение может ускорить работу, но привести к ограничениям провайдера.",

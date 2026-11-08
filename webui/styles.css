@@ -1,3 +1,37 @@
+.mpt-auth-hero {
+    max-width: 28rem;
+    margin: 1.5rem auto 0.75rem;
+    text-align: center;
+}
+.mpt-auth-hero h1 {
+    font-size: 1.6rem;
+    margin-bottom: 0.35rem;
+}
+.mpt-auth-hero p {
+    color: var(--text-color, inherit);
+    opacity: 0.82;
+    margin: 0;
+    line-height: 1.45;
+}
+
+div[class*="st-key-auth_screen"] {
+    max-width: 28rem;
+    margin: 0 auto 2rem;
+}
+
+/* The device key store is a zero-height iframe that talks to localStorage.
+   Keep it out of the layout, especially on phones where extra chrome is costly. */
+div[class*="st-key-mpt_device_key_store"],
+iframe[title="mpt_device_key_store"] {
+    display: none !important;
+    height: 0 !important;
+    width: 0 !important;
+    min-height: 0 !important;
+    border: 0 !important;
+    position: absolute !important;
+    overflow: hidden !important;
+}
+
 header[data-testid="stHeader"],
 div[data-testid="stToolbar"],
 div[data-testid="stDecoration"],
@@ -5,6 +39,15 @@ div[data-testid="stStatusWidget"],
 div[data-testid="stSkillsNudgeAnchor"],
 div[data-testid="stSkillsNudge"] {
     display: none !important;
+}
+
+/* Streamlit 1.66 marks widgets stale on every rerun and fragment tick, then
+   fades them (opacity ~0.33 after a 0.5s delay) until the run finishes.
+   Idle 1s/2s fragments and reconnects make the whole UI dim then flash
+   bright for no reason. Keep widgets fully opaque; the running man is hidden. */
+[data-stale="true"] {
+    opacity: 1 !important;
+    transition: none !important;
 }
 
 div[data-testid="stMainBlockContainer"] {

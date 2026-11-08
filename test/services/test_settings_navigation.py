@@ -276,6 +276,45 @@ def test_final_image_url_edit_is_saved_before_switching_provider():
         )
 
 
+def test_image_endpoint_and_model_appear_as_configured_on_general_tab():
+    with settings_app("image", provider="openai_image") as (app, settings, _, _):
+        run(app)
+        app.text_input(key="openai_image_base_url_input").set_value(
+            "https://images.example/v1"
+        )
+        app.text_input(key="openai_image_model_input").set_value("local-image")
+        app.session_state["settings_dialog_target_tab"] = "general"
+        run(app)
+        assert settings["openai_image_base_url"] == "https://images.example/v1"
+        assert settings["openai_image_model"] == "local-image"
+        assert (
+            app.selectbox(key="settings_general_ai_image_provider_select_en").value
+            == "openai_image"
+        )
+
+
+def test_image_save_button_persists_api_key_and_model():
+    with settings_app("image", provider="openai_image") as (app, settings, _, _):
+        run(app)
+        assert (
+            app.button(key="save_ai_image_api_settings").label
+            == "Save API Key & Model"
+        )
+        app.text_input(key="openai_image_base_url_input").set_value(
+            "https://images.example/v1"
+        )
+        app.text_input(key="openai_image_model_input").set_value("local-image")
+        app.text_input(key="openai_image_api_keys_input").set_value("sk-image")
+        app.button(key="save_ai_image_api_settings").click()
+        run(app)
+        assert settings["openai_image_base_url"] == "https://images.example/v1"
+        assert settings["openai_image_model"] == "local-image"
+        assert settings["openai_image_api_keys"] == ["sk-image"]
+        assert any(
+            "API key and model saved." in str(item.value) for item in app.success
+        )
+
+
 def test_final_material_edit_survives_general_and_reopening():
     with settings_app("stock", provider="pexels") as (app, settings, _, _):
         run(app)
