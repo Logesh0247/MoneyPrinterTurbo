@@ -1,3 +1,4 @@
+import pytest
 import tempfile
 import unittest
 from pathlib import Path
@@ -42,3 +43,11 @@ class TestUploadPostMissingPlatform(unittest.TestCase):
                         [{"platform": "tiktok", "success": True}, {"platform": "instagram", "success": True}]):
             with self.subTest(results=results):
                 self.assertTrue(self.upload({"success": True, "results": results})["success"])
+
+
+# Legacy adapter unit tests simulate a permissive boundary; production Safe Mode
+# remains fail-closed and is tested separately in test_youtube_safety.py.
+@pytest.fixture(autouse=True)
+def _legacy_adapter_boundary(monkeypatch):
+    from app.services import youtube_safety
+    monkeypatch.setattr(youtube_safety, "is_youtube_target", lambda platforms: False)

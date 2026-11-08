@@ -46,3 +46,11 @@ def test_explicit_queued_youtube_privacy_wins_over_current_configuration():
         post.return_value.json.return_value = {"success": False}
         UploadPostService().upload_video("fixture.mp4", "Title", youtube_extra={"privacyStatus": "private"})
         assert dict(post.call_args.kwargs["data"])["privacyStatus"] == "private"
+
+
+# Legacy adapter unit tests simulate a permissive boundary; production Safe Mode
+# remains fail-closed and is tested separately in test_youtube_safety.py.
+@pytest.fixture(autouse=True)
+def _legacy_adapter_boundary(monkeypatch):
+    from app.services import youtube_safety
+    monkeypatch.setattr(youtube_safety, "is_youtube_target", lambda platforms: False)

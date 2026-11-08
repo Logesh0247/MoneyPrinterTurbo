@@ -660,3 +660,137 @@ Click to view the [`LICENSE`](LICENSE) file
 ### Editable local video projects
 
 Use [revision-aware local projects](docs/video-projects.md) to replace prepared scene media, compare revisions and rebuild only affected stages. The opt-in CLI preserves verified artifacts and the last successful export; it makes no provider calls or automatic posts.
+
+### YouTube Safe Mode: publishing blocked
+
+YouTube publishing is currently blocked, including private and unlisted uploads.
+The official YouTube Data API OAuth uploader, mandatory quality verification,
+quota checks and human-approval controls are not implemented. No quality score
+or pass is inferred from sampled checks. Existing Upload-Post YouTube routes and
+the daily queue cannot bypass the block. Other video-generation features remain
+available. Do not treat this as a complete channel-automation system.
+
+### Review a video before YouTube publishing
+
+The legacy publishing workflow described below is currently blocked by Safe Mode.
+For a headless/server WebUI, open **Task Manager**, press **Play** on a completed
+video, and use **Check video quality** to inspect its metadata and sample frames.
+In **Review and publish to YouTube**, enter and review the title, description,
+visibility and audience before explicitly submitting. Configure and enable
+Upload-Post first, and turn **Enable Auto-Publish** off; otherwise the automatic
+workflow can publish without waiting for review. The reviewed workflow is
+separate from existing auto-publishing and does not change its behavior.
+
+The quality check is advisory: it does not verify the whole video, subtitles,
+facts, copyright or policy compliance. Review the video and its rights manually.
+Confirm that it has not already been uploaded (including through another app or
+the legacy auto-publisher). The uploader sends a synthetic-media declaration;
+ensure it is appropriate for the content.
+
+A local task-directory record prevents repeated reviewed uploads of the same
+output, including after a restart, and stores an Upload-Post request ID when
+available. It is not a global YouTube deduplication mechanism. If a result is
+unconfirmed or the process stops, check Upload-Post and YouTube before taking
+any further action; do not simply resubmit. Keep task storage persistent and
+backed up. This review workflow does not yet provide a publishing scheduler or
+an automatic recovery/retry mechanism. Protect the WebUI with authenticated
+private access before exposing a server, as it can publish and stores API keys.
+
+### Daily YouTube script queue (opt in)
+
+Safe Mode currently prevents this queue from being enabled or running, even if
+it was previously enabled. It cannot publish until the required official uploader
+and safeguards have been implemented.
+
+The WebUI's **Optional: Daily YouTube script queue** is independent of normal
+one-off generation and is paused by default. It accepts multiple scripts: use a title
+on the first line, the script below it, and `---` on a line by itself between
+scripts. Each entry snapshots the current video/voice settings and YouTube
+visibility and audience. Currently this queue supports one output per script,
+Pexels/Pixabay/Coverr footage and configured TTS voices; uploaded audio, music
+and local footage are not supported. Configure the LLM, footage and voice
+providers as required, and enable/configure Upload-Post with a connected YouTube
+channel. Keep the existing **Enable Auto-Publish** setting off: this queue has
+its own publisher. The queue is paused by default; explicitly enable it in the UI.
+
+The scheduler prepares the first queued video in advance and starts its upload
+at **18:00 Asia/Kolkata** (polling every 30 seconds; completion may be later).
+It prepares only one video at a time and attempts at most one upload per date.
+If the scheduler is offline or the video is not ready more than 15 minutes after
+18:00, the slot is missed and the upload waits for the next day; no backlog is
+published at once. An interrupted generation or uncertain upload stops the queue
+until you inspect it. To move past it, pause the queue, verify task and provider
+status, skip the item and resume. Never retry an uncertain upload without first
+checking Upload-Post and YouTube. This is not a global duplicate detector.
+
+Run the scheduler continuously on the same machine and shared persistent
+storage as the WebUI, for example in a second terminal:
+
+```sh
+.venv/bin/python -m app.services.daily_queue
+```
+
+For a source-based Docker deployment, use `docker compose --profile scheduler up -d --build`.
+The release compose file pulls a prebuilt image and does not include local source
+changes; use the source compose file for this feature. Keep the server and worker
+running across scheduled times, back up `storage/`, and secure the WebUI with
+private authenticated access. Changes to `config.toml` are picked up on the next
+worker iteration. Provider failures, account settings, network access and service
+latency can prevent or delay publishing; this does not guarantee delivery at an
+exact time. The queue doesn't yet offer automatic fact checks, custom descriptions,
+analytics or automatic retry. Test with private uploads before using public visibility.
+
+### Higher-quality video export
+
+In **Video Settings**, choose **Output quality → High quality** before generating
+or adding scripts to the daily queue. This optional profile uses CPU `libx264`
+with CRF 18 for intermediate clips, concatenation and final output, plus 256 kbps
+AAC at 48 kHz and MP4 fast-start. The existing standard profile remains the default and
+preserves existing encoder behavior. High quality ignores the hardware encoder
+selection, typically takes longer and uses more disk space. The encoder uses the
+project's existing 30 fps output; it cannot recover motion missing from the
+source footage or improve a low-quality narration recording. YouTube may
+re-encode uploads and its higher-resolution versions can take time to process.
+
+### Cinematic scenes with native dialogue (optional)
+
+The WebUI's **Optional: Cinematic scene with dialogue** accepts a complete scene
+prompt, including characters, dialogue, action, camera and sound. Configure a
+Jalapeno Cloud video model that explicitly supports native audio, choose its
+resolution in Material API settings, and confirm the provider's charges before
+submission. The app sends one Seedance-compatible task with `generate_audio=true`
+and preserves the returned video and audio bytes; it does not replace the audio
+with narration, add music, or automatically publish the scene. Ordinary video
+creation is unchanged.
+
+The feature does not guarantee that a specific model supports the flag, generates
+dialogue, follows the requested frame rate or duration, maintains character
+continuity, or produces accurate lip sync. Inspect the result and any warnings.
+The provider may charge for unsuccessful or uncertain submissions; the app does
+not automatically repeat a paid submission. If a request fails or times out,
+check the provider task status before trying again. Provider availability,
+pricing and account access vary; live generation requires a reachable service.
+
+### Render free-tier preview (experimental)
+
+`render.yaml` and `Dockerfile.render` provide a password-protected, redeployable
+WebUI preview on a Render free web service. Connect the repository and this
+branch in Render, create a Blueprint from `render.yaml`, and set a strong,
+unique `WEBUI_PASSWORD` (at least 20 characters) in Render's dashboard. Sign
+in to the WebUI as `operator` using that password; do not share it in chat.
+The container refuses to start without a password. HTTPS must be used; Render
+terminates TLS. The only unauthenticated endpoint is the minimal health check.
+
+**Limitations:** Render's free service sleeps when idle, its filesystem is
+ephemeral, and the WebUI's settings and generated videos may be lost on restart
+or redeploy. It is not a reliable scheduled-video worker and has limited memory;
+large video workloads may fail. The image overlays this checkout on the current
+official runtime image, so a future upstream image change may break compatibility.
+This deployment has not been verified on Render. Test the authentication and
+WebSocket connection before use and do not expose the service if either fails.
+
+The current app still stores provider credentials in its local configuration,
+not a dedicated secrets manager. Do not use production API keys or YouTube
+credentials in this preview until a secure secrets integration is implemented.
+YouTube publishing remains blocked in Safe Mode. For production, use persistent
+storage, a secrets manager, access controls and a separately managed worker.

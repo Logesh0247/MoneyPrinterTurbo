@@ -1,3 +1,4 @@
+import pytest
 import sys
 import unittest
 from pathlib import Path
@@ -463,3 +464,11 @@ class TestUploadPostServiceDynamicConfig(unittest.TestCase):
             test_app_config["upload_post_enabled"] = False
             self.assertFalse(service.enabled)
             self.assertFalse(service.is_configured())
+
+
+# Legacy adapter unit tests simulate a permissive boundary; production Safe Mode
+# remains fail-closed and is tested separately in test_youtube_safety.py.
+@pytest.fixture(autouse=True)
+def _legacy_adapter_boundary(monkeypatch):
+    from app.services import youtube_safety
+    monkeypatch.setattr(youtube_safety, "is_youtube_target", lambda platforms: False)

@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: moneyprinterturbo-preview
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile.render
+    healthCheckPath: /_render_health
+    envVars:
+      - key: WEBUI_PASSWORD
+        sync: false

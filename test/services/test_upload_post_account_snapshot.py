@@ -1,3 +1,4 @@
+import pytest
 """A scheduled publish belongs to the account selected at scheduling time."""
 
 import json
@@ -118,3 +119,11 @@ class TestUploadPostAccountSnapshot(unittest.TestCase):
                 "Authorization": "Apikey account-a-test-key"
             })
             self.assertEqual(state.get_task(task_id)["cross_post_state"], const.CROSS_POST_STATE_COMPLETE)
+
+
+# Legacy adapter unit tests simulate a permissive boundary; production Safe Mode
+# remains fail-closed and is tested separately in test_youtube_safety.py.
+@pytest.fixture(autouse=True)
+def _legacy_adapter_boundary(monkeypatch):
+    from app.services import youtube_safety
+    monkeypatch.setattr(youtube_safety, "is_youtube_target", lambda platforms: False)

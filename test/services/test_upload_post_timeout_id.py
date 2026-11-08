@@ -1,3 +1,4 @@
+import pytest
 import tempfile
 import unittest
 from pathlib import Path
@@ -60,3 +61,11 @@ class TestUploadPostTimeoutId(unittest.TestCase):
             self.assertIn("unconfirmed", result["error"])
             self.assertEqual(result["request_id"], dict(post.call_args.kwargs["data"])["request_id"])
             self.assertEqual(post.call_count, 1)
+
+
+# Legacy adapter unit tests simulate a permissive boundary; production Safe Mode
+# remains fail-closed and is tested separately in test_youtube_safety.py.
+@pytest.fixture(autouse=True)
+def _legacy_adapter_boundary(monkeypatch):
+    from app.services import youtube_safety
+    monkeypatch.setattr(youtube_safety, "is_youtube_target", lambda platforms: False)

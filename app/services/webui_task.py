@@ -336,3 +336,64 @@ def _enqueue_generation(
             f"failed to submit WebUI generation task, task_id={task_id}, error={exc}"
         )
         raise
+
+
+# Native-audio scenes share the WebUI generation queue but do not enter the
+# narration/editing pipeline, which would replace the provider's audio.
+_scene_submissions: dict[str, str] = {}
+
+
+def submit_cinematic_scene(task_id, prompt, duration, aspect, endpoint):
+    """Queue a paid scene once while an identical request is active."""
+    from app.services import cinematic_scene
+
+    prompt = str(prompt or "").strip()
+    if not prompt or len(prompt) > 12000:
+        raise cinematic_scene.CinematicSceneError("Scene prompt must contain 1–12000 characters")
+    if not endpoint.generate_audio or isinstance(duration, bool) or not isinstance(duration, int) or not endpoint.min_duration <= duration <= endpoint.max_duration:
+        raise cinematic_scene.CinematicSceneError("Choose a supported duration and native-audio model")
+    payload = json.dumps([prompt, duration, str(aspect), endpoint.provider_id,
+                          endpoint.tasks_url, endpoint.model, endpoint.resolution,
+                          hashlib.sha256(endpoint.api_key.encode()).hexdigest()], ensure_ascii=False)
+    signature = hashlib.sha256(payload.encode()).hexdigest()
+    with _submission_lock:
+        if signature in _scene_submissions:
+            return _scene_submissions[signature]
+        _scene_submissions[signature] = task_id
+    try:
+        sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=0,
+                             video_subject="Cinematic scene")
+        _task_manager.add_task(_run_cinematic_scene, task_id, prompt, duration, aspect, endpoint, signature)
+    except Exception:
+        with _submission_lock:
+            _scene_submissions.pop(signature, None)
+        sm.state.update_task(task_id, state=const.TASK_STATE_FAILED, progress=0,
+                             failed_stage="scheduling", error="Unable to queue the scene.")
+        raise
+    return task_id
+
+
+def _run_cinematic_scene(task_id, prompt, duration, aspect, endpoint, signature):
+    from app.services import cinematic_scene
+    try:
+        sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=5)
+        with config.runtime_config_lock():
+            result = cinematic_scene.generate_scene(task_id, prompt, duration, aspect, endpoint)
+        sm.state.update_task(task_id, state=const.TASK_STATE_COMPLETE, progress=100, **result)
+    except Exception as exc:
+        remote_id = getattr(exc, "task_id", "")
+        # Avoid persisting arbitrary provider errors or credentials. An uncertain
+        # outcome must never invite an automatic paid retry.
+        logger.error(
+            "Cinematic scene generation failed: error_type={}; check provider task status before retrying",
+            type(exc).__name__,
+        )
+        error = "Scene failed or is unconfirmed; check the provider before submitting again."
+        if remote_id:
+            error += f" Provider task ID: {remote_id}"
+        sm.state.update_task(task_id, state=const.TASK_STATE_FAILED, progress=0,
+                             failed_stage="cinematic_scene", error=error)
+    finally:
+        with _submission_lock:
+            if _scene_submissions.get(signature) == task_id:
+                del _scene_submissions[signature]
