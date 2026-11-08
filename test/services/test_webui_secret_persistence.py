@@ -1,6 +1,5 @@
 import ast
 from pathlib import Path
-from types import SimpleNamespace
 
 from webui.device_key_store import is_blank_value, is_credential_key
 
