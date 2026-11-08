@@ -317,10 +317,27 @@ CREDENTIAL_COMPANION_KEYS = {
     ),
 }
 
+# AI 图片素材源的启用条件不是“有 Key”，而是 Base URL + 模型（本地网关可以
+# 完全不填 Key）。只备份 openai_image_api_keys 时，Render 休眠或换设备恢复后
+# 密钥还在，General / 生成预检却仍显示未配置。Codex 图片同样需要独立模型名。
+IMAGE_MATERIAL_COMPANION_KEYS = (
+    "openai_image_base_url",
+    "openai_image_model",
+    "openai_image_size",
+    "openai_image_prompt_template",
+    "codex_image_model_name",
+    "codex_image_timeout",
+)
+
 NON_LLM_COMPANION_KEYS = {
     # 选中的大模型和素材来源必须和密钥一起记住，否则设备恢复后 Key 还在，
     # 界面却回到默认 Provider，看起来像是还要重新填写。
-    "app": ("upload_post_username", "llm_provider", "video_source"),
+    "app": (
+        "upload_post_username",
+        "llm_provider",
+        "video_source",
+        *IMAGE_MATERIAL_COMPANION_KEYS,
+    ),
 }
 # 同一个密钥在不同面板可能使用各自的控件 key：音频面板直接编辑 Gemini 和
 # MiMo 的 LLM 密钥。恢复备份时必须清除每一个别名，否则遗留的旧值
@@ -347,9 +364,13 @@ def _set_runtime_config(section_name, key, value):
     rerun 不会把用户刚输入的内容重置为旧配置。
 
     密码控件在手机浏览器重连时可能重放空值。凭据配置项遇到空值且当前已有保存
-    值时忽略这次写入，避免用户下次打开应用时必须重新填写 API Key。
+    值时忽略这次写入，避免用户下次打开应用时必须重新填写 API Key。文生图的
+    Base URL / 模型不是密码框，但重连同样可能把空字符串写回，导致刚配置好的
+    图片源在下一次打开时又变成“未配置”。
     """
-    if _is_secret_config_key(key) and _is_blank_secret_value(value):
+    if _is_blank_secret_value(value) and (
+        _is_secret_config_key(key) or key in IMAGE_MATERIAL_COMPANION_KEYS
+    ):
         config_section = _RUNTIME_CONFIG_SECTIONS[section_name]
         existing = config.snapshot_config_with_pending(config_section).get(key)
         if not _is_blank_secret_value(existing):
@@ -380,6 +401,28 @@ def _save_runtime_config():
     if not saved:
         logger.debug("deferred WebUI config save until active task completes")
     return saved
+
+
+def _render_save_api_settings_button(widget_key, container=None):
+    """
+    明确保存当前面板上的 API 密钥和模型。
+
+    Streamlit 文本框通常要失焦或按回车才提交。点保存会先提交当前输入，
+    再把已经写入运行期配置的密钥/模型立即落盘，避免文生图或大模型看起来
+    “配置不上”。
+    """
+    panel = st if container is None else container
+    if panel.button(
+        tr("Save API Settings"),
+        key=widget_key,
+        use_container_width=True,
+        type="primary",
+        icon=":material/save:",
+    ):
+        if _save_runtime_config():
+            panel.success(tr("API Settings Saved"))
+        else:
+            panel.warning(tr("Runtime Configuration Busy"))
 
 
 def _saved_ui_choice(key, options, default, section=None):
@@ -3106,7 +3149,11 @@ def _get_material_api_keys(config_key):
     api_keys = config.snapshot_config_with_pending(config.app).get(config_key, [])
     if isinstance(api_keys, str):
         api_keys = [api_keys]
-    return ", ".join(api_keys)
+    elif not isinstance(api_keys, (list, tuple)):
+        api_keys = [] if api_keys is None else [api_keys]
+    return ", ".join(
+        str(item) for item in api_keys if item is not None and str(item).strip()
+    )
 
 
 def _save_material_api_keys(config_key, value):
@@ -3502,12 +3549,15 @@ def _restore_secret_widgets_from_config():
 
     Streamlit 会把密码框的空状态写进 session_state，且该值优先于控件的
     value 参数。如果不先回填，用户下次打开应用会看到空白输入框，误以为
-    还要重新填写。
+    还要重新填写。文生图 Base URL / 模型同样会在重连后变成空字符串，必须
+    一起回填，否则页面会把空值写回配置，AI 图片源看起来“配置不上”。
     """
     for section_name, section in _RUNTIME_CONFIG_SECTIONS.items():
         snapshot = config.snapshot_config_with_pending(section)
         for key, value in snapshot.items():
-            if not _is_credential_config_key(key):
+            if not _is_credential_config_key(
+                key
+            ) and key not in IMAGE_MATERIAL_COMPANION_KEYS:
                 continue
             configured_text = _format_secret_widget_value(value)
             if not configured_text:
@@ -5251,6 +5301,10 @@ def _render_settings_dialog():
                             kimi_code_oauth.resolve_region(st_llm_base_url), tr
                         )
 
+                _render_save_api_settings_button(
+                    "save_llm_api_settings", llm_form_panel
+                )
+
                 if llm_form_panel.button(
                     tr("Test LLM Connection"),
                     key="test_llm_connection_button",
@@ -5333,6 +5387,9 @@ def _render_settings_dialog():
                         )
                         remembered[group] = provider
                         _render_material_provider_settings(provider)
+                        _render_save_api_settings_button(
+                            f"save_{group}_api_settings"
+                        )
                 st.session_state["settings_material_providers"] = remembered
 
     _save_runtime_config()

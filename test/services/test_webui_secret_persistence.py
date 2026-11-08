@@ -18,6 +18,7 @@ HELPERS = {
 CONSTANTS = {
     "CREDENTIAL_KEY_SUFFIXES",
     "CREDENTIAL_WIDGET_STATE_ALIASES",
+    "IMAGE_MATERIAL_COMPANION_KEYS",
 }
 
 
@@ -155,3 +156,40 @@ def test_restore_does_not_invent_widgets_that_were_never_shown():
     restore()
 
     assert NAMESPACE["fake_st"].session_state == {}
+
+
+def test_empty_image_url_replay_does_not_clear_saved_endpoint():
+    set_runtime_config = NAMESPACE["_set_runtime_config"]
+    NAMESPACE["app_section"]["openai_image_base_url"] = "https://images.example/v1"
+    NAMESPACE["app_section"]["openai_image_model"] = "local-image"
+    NAMESPACE["fake_config"].updates.clear()
+
+    assert set_runtime_config("app", "openai_image_base_url", "") is False
+    assert set_runtime_config("app", "openai_image_model", "   ") is False
+    assert (
+        NAMESPACE["app_section"]["openai_image_base_url"] == "https://images.example/v1"
+    )
+    assert NAMESPACE["app_section"]["openai_image_model"] == "local-image"
+    assert NAMESPACE["fake_config"].updates == []
+
+
+def test_restore_fills_empty_image_endpoint_widgets_from_saved_config():
+    restore = NAMESPACE["_restore_secret_widgets_from_config"]
+    NAMESPACE["app_section"]["openai_image_base_url"] = "https://images.example/v1"
+    NAMESPACE["app_section"]["openai_image_model"] = "local-image"
+    NAMESPACE["fake_st"].session_state.clear()
+    NAMESPACE["fake_st"].session_state.update(
+        {
+            "openai_image_base_url_input": "",
+            "openai_image_model_input": "  ",
+            "video_subject": "untouched",
+        }
+    )
+
+    restore()
+
+    assert NAMESPACE["fake_st"].session_state == {
+        "openai_image_base_url_input": "https://images.example/v1",
+        "openai_image_model_input": "local-image",
+        "video_subject": "untouched",
+    }

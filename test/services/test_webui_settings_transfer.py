@@ -37,6 +37,7 @@ SETTINGS_TRANSFER_CONSTANTS = {
     "CREDENTIAL_KEY_SUFFIXES",
     "CREDENTIAL_COMPANION_KEYS",
     "CREDENTIAL_WIDGET_STATE_ALIASES",
+    "IMAGE_MATERIAL_COMPANION_KEYS",
     "NON_LLM_COMPANION_KEYS",
     "KEY_BACKUP_EXCLUDED_SECTIONS",
 }
@@ -464,6 +465,41 @@ def test_key_backup_includes_selected_providers_with_credentials():
 
     assert backup["app"]["llm_provider"] == "openai"
     assert backup["app"]["video_source"] == "pexels"
+
+
+def test_key_backup_keeps_openai_image_endpoint_with_or_without_keys():
+    """
+    OpenAI 兼容文生图靠 Base URL + 模型启用，Key 可选。设备备份必须带上这两项，
+    否则恢复后 General 仍显示未配置，生成预检也会要求重新填写。
+    """
+    sections = {
+        "app": {
+            "openai_image_base_url": " https://images.example/v1 ",
+            "openai_image_model": " local-image ",
+            "openai_image_size": "1024x1536",
+            "openai_image_prompt_template": "cinematic photo of {term}",
+            "codex_image_model_name": "image-model",
+            "codex_image_timeout": "300",
+            "video_language": "en-US",
+        }
+    }
+    backup = collect_key_backup(sections)
+
+    assert backup == {
+        "app": {
+            "openai_image_base_url": "https://images.example/v1",
+            "openai_image_model": "local-image",
+            "openai_image_size": "1024x1536",
+            "openai_image_prompt_template": "cinematic photo of {term}",
+            "codex_image_model_name": "image-model",
+            "codex_image_timeout": "300",
+        }
+    }
+
+    restored = parse_key_backup(
+        _encode(build_key_backup_payload(sections, "1.3.4")), sections
+    )
+    assert restored == backup
 
 
 def test_credential_config_key_detection_covers_project_naming():

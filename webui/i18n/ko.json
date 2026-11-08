@@ -418,6 +418,8 @@
     "OpenAI Image API Key": "OpenAI 호환 이미지 API 키",
     "OpenAI Image Model": "OpenAI 호환 이미지 모델",
     "Please Configure the OpenAI Image Source": "OpenAI 호환 이미지 소스의 **Base URL**과 **모델**을 구성해 주세요 (로컬 게이트웨이는 **API 키** 선택 사항)",
+    "Save API Settings": "API 키와 모델 저장",
+    "API Settings Saved": "API 키와 모델이 저장되었습니다.",
     "Video Encoder": "영상 인코더",
     "Material Concurrency": "스톡 영상 동시 처리 수",
     "Material Concurrency Help": "Pexels, Pixabay, Coverr의 검색과 다운로드에만 적용됩니다. 기본값은 1(순차 처리)입니다. 값을 높이면 빨라질 수 있지만 제공업체의 요청 제한에 걸릴 수 있습니다.",

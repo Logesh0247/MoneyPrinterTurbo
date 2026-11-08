@@ -548,6 +548,8 @@
     "OpenAI Image API Key": "OpenAI 兼容文生图 API 密钥",
     "OpenAI Image Model": "OpenAI 兼容文生图模型",
     "Please Configure the OpenAI Image Source": "请配置 OpenAI 兼容文生图的 **Base URL** 和 **模型**（本地网关可免填 **API 密钥**）",
+    "Save API Settings": "保存 API 密钥和模型",
+    "API Settings Saved": "API 密钥和模型已保存。",
     "Video Encoder": "视频编码器",
     "Material Concurrency": "库存素材并发",
     "Material Concurrency Help": "仅影响 Pexels、Pixabay 和 Coverr 的素材搜索与下载。默认 1（串行）；提高并发可加快处理，但可能触发平台限流。",
