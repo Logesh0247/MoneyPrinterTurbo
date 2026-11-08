@@ -804,8 +804,10 @@ read `OPENROUTER_API_KEY`, `PIXABAY_API_KEY`, `OPENAI_IMAGE_API_KEY`, and
 configuration. Explicit per-provider configuration takes precedence. To set
 non-secret startup defaults, use `MPT_DEFAULT_OPENROUTER=1` (OpenRouter and
 `openrouter/free` when no model was configured), `MPT_DEFAULT_PIXABAY=1`, and
-`MPT_DEFAULT_OPENAI_IMAGE=1` with `MPT_OPENAI_IMAGE_MODEL` set to a model your
-OpenAI account supports. Image generation is a separate source selection.
+`MPT_DEFAULT_OPENAI_IMAGE=1`. The last option fills the official OpenAI image
+endpoint and `gpt-image-1` only when unset; `MPT_OPENAI_IMAGE_MODEL` can select
+another model. Verify model availability and pricing for your account. Image
+generation is a separate source selection and can incur charges.
 
 Environment-supplied OpenRouter, OpenAI Image, and Jalapeno video keys are only
 sent to their respective official endpoints; custom gateways require an

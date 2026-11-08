@@ -27,6 +27,30 @@ def test_host_defaults_are_opt_in_and_never_copy_secrets():
     }
 
 
+def test_openai_image_opt_in_has_official_defaults_and_preserves_custom_values():
+    settings = {}
+    config.apply_host_defaults(settings, {"MPT_DEFAULT_OPENAI_IMAGE": "1"})
+    assert settings == {"openai_image_base_url": "https://api.openai.com/v1", "openai_image_model": "gpt-image-1"}
+    custom = {"openai_image_base_url": "https://images.example/v1"}
+    config.apply_host_defaults(custom, {"MPT_DEFAULT_OPENAI_IMAGE": "1"})
+    assert "openai_image_model" not in custom
+    config.apply_host_defaults(custom, {"MPT_DEFAULT_OPENAI_IMAGE": "1", "MPT_OPENAI_IMAGE_MODEL": "another-model"})
+    assert custom["openai_image_model"] == "another-model"
+
+
+def test_openai_image_readiness_detects_missing_official_key(monkeypatch):
+    monkeypatch.delenv("OPENAI_IMAGE_API_KEY", raising=False)
+    settings = {"openai_image_base_url": "https://api.openai.com/v1", "openai_image_model": "gpt-image-1"}
+    assert "API key" in material.openai_image_configuration_issue(settings)
+    assert not material.is_openai_image_enabled(settings)
+    monkeypatch.setenv("OPENAI_IMAGE_API_KEY", "synthetic-secret")
+    assert material.is_openai_image_enabled(settings)
+    monkeypatch.delenv("OPENAI_IMAGE_API_KEY")
+    assert material.is_openai_image_enabled({**settings, "openai_image_api_keys": ["synthetic-key"]})
+    assert material.is_openai_image_enabled({**settings, "openai_image_base_url": "http://localhost:8080/v1"})
+    assert "model" in material.openai_image_configuration_issue({"openai_image_base_url": "https://api.openai.com/v1"})
+
+
 def test_pixabay_environment_key_is_used_without_writing_config(monkeypatch):
     monkeypatch.setenv("PIXABAY_API_KEY", "test-pixabay-env")
     monkeypatch.setattr(config, "app", {"pixabay_api_keys": []})

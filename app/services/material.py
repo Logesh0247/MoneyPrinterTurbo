@@ -1428,19 +1428,33 @@ OPENAI_IMAGE_MAX_DOWNLOAD_ATTEMPTS = 3
 OPENAI_IMAGE_DOWNLOAD_BACKOFF_SECONDS = 2
 
 
-def is_openai_image_enabled(app_config: dict | None = None) -> bool:
-    """
-    判断 OpenAI 兼容文生图素材源是否已完成最小配置。
+def openai_image_configuration_issue(app_config: dict | None = None) -> str:
+    """Return an actionable, non-secret local configuration error, if any.
 
-    API Key 允许为空：完全本地的 ComfyUI/SD 网关通常不需要鉴权，为空时
-    请求不带 Authorization 头。供任务预检和 WebUI 在消耗 LLM、TTS 额度
-    前拦截缺失配置的任务。
+    Official OpenAI requires authentication. Custom and local gateways may
+    explicitly permit anonymous requests; retain that existing behavior.
+    This check does not authenticate or verify model access or billing.
     """
     app_config = config.app if app_config is None else app_config
-    return bool(
-        str(app_config.get("openai_image_base_url", "") or "").strip()
-        and str(app_config.get("openai_image_model", "") or "").strip()
-    )
+    base = str(app_config.get("openai_image_base_url", "") or "").strip().rstrip("/")
+    model = str(app_config.get("openai_image_model", "") or "").strip()
+    if not base:
+        return "Set the image provider base URL."
+    if not model:
+        return "Set an image model available to your provider account."
+    if base == "https://api.openai.com/v1":
+        configured = app_config.get("openai_image_api_keys")
+        if isinstance(configured, (list, tuple)):
+            has_key = any(str(item or "").strip() for item in configured)
+        else:
+            has_key = bool(str(configured or "").strip())
+        if not has_key and not os.getenv("OPENAI_IMAGE_API_KEY", "").strip():
+            return "OpenAI Image requires an API key in the server environment or image settings."
+    return ""
+
+
+def is_openai_image_enabled(app_config: dict | None = None) -> bool:
+    return not openai_image_configuration_issue(app_config)
 
 
 def _openai_image_endpoint() -> tuple[str, str]:
