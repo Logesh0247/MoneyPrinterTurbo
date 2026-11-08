@@ -16,6 +16,7 @@
   <body>
     <script>
       const STORAGE_KEY = "moneyprinterturbo.device-keys.v1";
+      const DEFAULT_COOKIE = "mpt_session";
 
       function sendMessageToStreamlit(type, data) {
         window.parent.postMessage(
@@ -59,6 +60,25 @@
         }
       }
 
+      function setSessionCookie(name, token, maxAge) {
+        const cookieName = name || DEFAULT_COOKIE;
+        const secure = window.location.protocol === "https:" ? "; Secure" : "";
+        if (!token) {
+          document.cookie =
+            cookieName + "=; path=/; max-age=0; SameSite=Lax" + secure;
+          return;
+        }
+        const age = Number(maxAge) > 0 ? Number(maxAge) : 7776000;
+        document.cookie =
+          cookieName +
+          "=" +
+          encodeURIComponent(token) +
+          "; path=/; max-age=" +
+          age +
+          "; SameSite=Lax" +
+          secure;
+      }
+
       window.addEventListener("message", function (event) {
         const data = event.data;
         if (!data || data.type !== "streamlit:render") {
@@ -67,6 +87,13 @@
         const args = data.args || {};
         if (args.payload_to_save) {
           writeStore(args.payload_to_save);
+        }
+        if (Object.prototype.hasOwnProperty.call(args, "session_token")) {
+          setSessionCookie(
+            args.cookie_name,
+            args.session_token,
+            args.session_max_age
+          );
         }
         setComponentValue({ ready: true, payload: readStore() });
         setFrameHeight();

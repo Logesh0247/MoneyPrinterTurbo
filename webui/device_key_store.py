@@ -10,9 +10,16 @@ from pathlib import Path
 
 from loguru import logger
 
+_UNSET = object()
+
 
 LOCAL_STORAGE_KEY = "moneyprinterturbo.device-keys.v1"
+DEVICE_VAULT_SCHEMA = "moneyprinterturbo.device-vault"
+DEVICE_VAULT_VERSION = 1
+KEY_BACKUP_SCHEMA = "moneyprinterturbo.key-backup"
 COMPONENT_KEY = "mpt_device_key_store"
+SESSION_COOKIE_NAME = "mpt_session"
+SESSION_COOKIE_MAX_AGE = 90 * 24 * 60 * 60
 CREDENTIAL_KEY_SUFFIXES = (
     "api_key",
     "api_keys",
@@ -53,6 +60,44 @@ def backup_has_credentials(backup):
             if is_credential_key(key) and not is_blank_value(value):
                 return True
     return False
+
+
+def unwrap_device_payload(payload):
+    """
+    Split a device blob into (account, session_token, keys_backup).
+
+    Older installs stored only the key-backup JSON. New installs wrap account,
+    session and keys together so a phone can restore sign-in after a restart.
+    """
+    if not isinstance(payload, dict):
+        return None, None, None
+    if payload.get("schema") == DEVICE_VAULT_SCHEMA:
+        account = payload.get("account")
+        token = str(payload.get("session_token") or "").strip() or None
+        keys_backup = payload.get("keys_backup")
+        if not isinstance(account, dict):
+            account = None
+        if not isinstance(keys_backup, dict):
+            keys_backup = None
+        return account, token, keys_backup
+    if payload.get("schema") == KEY_BACKUP_SCHEMA or "keys" in payload:
+        return None, None, payload
+    return None, None, None
+
+
+def build_device_vault(account=None, session_token=None, keys_backup=None, replace=False):
+    """Build the JSON blob written to this device. Empty parts are omitted."""
+    vault = {"schema": DEVICE_VAULT_SCHEMA, "version": DEVICE_VAULT_VERSION}
+    if isinstance(account, dict) and account.get("id"):
+        vault["account"] = account
+    token = str(session_token or "").strip()
+    if token:
+        vault["session_token"] = token
+    if isinstance(keys_backup, dict) and keys_backup.get("keys"):
+        vault["keys_backup"] = keys_backup
+    if replace:
+        return vault
+    return vault if ("account" in vault or "session_token" in vault or "keys_backup" in vault) else None
 
 
 def keys_to_apply(stored_keys, current_keys):
@@ -117,23 +162,34 @@ def _component():
     return _COMPONENT
 
 
-def render_device_key_store(payload_to_save=None):
+def device_key_store_available():
+    """False when the iframe cannot run (tests, missing files)."""
+    return _component() is not None
+
+
+def render_device_key_store(payload_to_save=None, session_token=_UNSET):
     """
     Read this device's remembered keys and optionally overwrite them.
 
     The first Streamlit render returns ``None`` (the iframe default). After the
     browser replies, the value is ``{"ready": True, "payload": ...}``. Passing
-    ``payload_to_save=None`` never clears localStorage.
+    ``payload_to_save=None`` never clears localStorage. Pass ``session_token=""``
+    to delete the session cookie; omit it to leave the cookie unchanged.
     """
     component = _component()
     if component is None:
         return None
+    kwargs = {
+        "payload_to_save": payload_to_save,
+        "default": None,
+        "key": COMPONENT_KEY,
+    }
+    if session_token is not _UNSET:
+        kwargs["session_token"] = "" if session_token is None else str(session_token)
+        kwargs["session_max_age"] = SESSION_COOKIE_MAX_AGE
+        kwargs["cookie_name"] = SESSION_COOKIE_NAME
     try:
-        return component(
-            payload_to_save=payload_to_save,
-            default=None,
-            key=COMPONENT_KEY,
-        )
+        return component(**kwargs)
     except Exception as exc:
         logger.debug(f"device key store render failed: {exc}")
         return None

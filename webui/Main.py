@@ -76,11 +76,15 @@ from app.utils.logging_utils import (
 )
 from app.utils import utils
 from app.utils.request_logging import trace_http_call
+from app.services import user_accounts
+from webui import auth as webui_auth
 from webui.device_key_store import (
+    build_device_vault,
     is_blank_value as _is_blank_secret_value,
     is_credential_key as _is_secret_config_key,
     keys_to_apply as _device_keys_to_apply,
     render_device_key_store,
+    unwrap_device_payload,
 )
 
 st.set_page_config(
@@ -2081,6 +2085,25 @@ def _render_top_bar():
         ):
             _render_task_manager_entry()
 
+            signed_in = webui_auth.current_user()
+            if signed_in:
+                st.button(
+                    signed_in.get("display_name") or signed_in.get("email") or tr("Sign Out"),
+                    key="signed_in_user_button",
+                    type="tertiary",
+                    icon=":material/account_circle:",
+                    width="content",
+                    disabled=True,
+                )
+                st.button(
+                    tr("Sign Out"),
+                    key="sign_out_button",
+                    type="secondary",
+                    icon=":material/logout:",
+                    width="content",
+                    on_click=webui_auth.sign_out,
+                )
+
             st.button(
                 tr("Settings"),
                 key="open_settings_dialog_button",
@@ -3487,43 +3510,88 @@ def _restore_secret_widgets_from_config():
                     st.session_state[widget_key] = configured_text
 
 
-def _sync_device_remembered_keys():
-    """
-    把当前 API Key 记住在这台设备上，并在服务器丢失配置时自动恢复。
-
-    手机把网页装到主屏幕后，localStorage 仍属于该站点。Render 免费实例休眠
-    或容器重建会丢掉 config.toml；下次打开应用时从本机恢复，不必重新输入。
-    """
+def _apply_saved_user_keys(user_id):
+    """Load this user's stored API keys into the running config."""
+    stored_keys = user_accounts.get_user_keys(user_id)
+    if not stored_keys:
+        return
     current_backup = _collect_key_backup(_RUNTIME_CONFIG_SECTIONS)
-    payload_to_save = None
-    if _count_backup_keys(current_backup) > 0:
-        payload_to_save = _build_key_backup_payload(
-            _RUNTIME_CONFIG_SECTIONS, config.project_version
-        )
-    result = render_device_key_store(payload_to_save)
-    if st.session_state.get("device_keys_applied"):
-        return
-    if not isinstance(result, dict) or not result.get("ready"):
-        return
-    st.session_state["device_keys_applied"] = True
-    stored_payload = result.get("payload")
-    if not isinstance(stored_payload, dict):
-        return
-    try:
-        restored = _parse_key_backup(
-            json.dumps(stored_payload).encode("utf-8"),
-            _RUNTIME_CONFIG_SECTIONS,
-        )
-    except Exception as exc:
-        logger.warning(f"ignored invalid device key store: {exc}")
-        return
-    to_apply = _device_keys_to_apply(restored, current_backup)
+    to_apply = _device_keys_to_apply(stored_keys, current_backup)
     if not to_apply:
         return
     restored_count = _apply_key_backup(to_apply)
     _save_runtime_config()
-    logger.info(f"restored keys from this device: count={restored_count}")
-    st.session_state["device_keys_restored_count"] = restored_count
+    if restored_count:
+        st.session_state["device_keys_restored_count"] = (
+            st.session_state.get("device_keys_restored_count", 0) + restored_count
+        )
+
+
+def _sync_device_remembered_keys():
+    """
+    把当前账号、会话和 API Key 记住在这台设备上，并在服务器丢失配置时自动恢复。
+
+    手机把网页装到主屏幕后，localStorage 仍属于该站点。Render 免费实例休眠
+    或容器重建会丢掉 config.toml 和账号文件；下次打开应用时从本机恢复登录
+    状态和密钥，不必重新注册或填写。
+    """
+    current_backup = _collect_key_backup(_RUNTIME_CONFIG_SECTIONS)
+    keys_payload = None
+    if _count_backup_keys(current_backup) > 0:
+        keys_payload = _build_key_backup_payload(
+            _RUNTIME_CONFIG_SECTIONS, config.project_version
+        )
+    signed_in = webui_auth.current_user()
+    if signed_in and keys_payload:
+        user_accounts.update_user_keys(signed_in["id"], keys_payload.get("keys") or {})
+
+    signed_out = bool(st.session_state.get("signed_out"))
+    clear_cookie = bool(st.session_state.get("clear_session_cookie"))
+    account = None if signed_out else st.session_state.get("device_account")
+    token = "" if signed_out or clear_cookie else st.session_state.get("session_token")
+    vault_to_save = build_device_vault(
+        account=account,
+        session_token=token,
+        keys_backup=keys_payload,
+        replace=signed_out,
+    )
+    if signed_out or clear_cookie:
+        result = render_device_key_store(vault_to_save, session_token="")
+        st.session_state.pop("clear_session_cookie", None)
+    elif token:
+        result = render_device_key_store(vault_to_save, session_token=token)
+    else:
+        result = render_device_key_store(vault_to_save)
+
+    if not isinstance(result, dict) or not result.get("ready"):
+        return {"ready": False, "vault": None}
+    st.session_state["device_keys_applied"] = True
+    account, stored_token, keys_backup = unwrap_device_payload(result.get("payload"))
+    vault = {
+        "account": account,
+        "session_token": stored_token,
+        "keys_backup": keys_backup,
+    }
+    if st.session_state.get("device_key_values_applied"):
+        return {"ready": True, "vault": vault}
+    st.session_state["device_key_values_applied"] = True
+    if not isinstance(keys_backup, dict):
+        return {"ready": True, "vault": vault}
+    try:
+        restored = _parse_key_backup(
+            json.dumps(keys_backup).encode("utf-8"),
+            _RUNTIME_CONFIG_SECTIONS,
+        )
+    except Exception as exc:
+        logger.warning(f"ignored invalid device key store: {exc}")
+        return {"ready": True, "vault": vault}
+    to_apply = _device_keys_to_apply(restored, current_backup)
+    if to_apply:
+        restored_count = _apply_key_backup(to_apply)
+        _save_runtime_config()
+        logger.info(f"restored keys from this device: count={restored_count}")
+        st.session_state["device_keys_restored_count"] = restored_count
+    return {"ready": True, "vault": vault}
 
 
 def _apply_pending_settings_preset():
@@ -9796,7 +9864,24 @@ def _render_generation_controls(
 
 def _render_application():
     """按固定顺序渲染顶部栏、弹窗、生成表单和任务结果。"""
-    _sync_device_remembered_keys()
+    device_state = _sync_device_remembered_keys() or {"ready": False, "vault": None}
+    if webui_auth.auth_gate_enabled():
+        if not webui_auth.current_user():
+            webui_auth.consume_oauth_callback()
+        if webui_auth.current_user():
+            pass
+        elif not device_state.get("ready") and not st.session_state.get(
+            "device_store_waited"
+        ):
+            st.session_state["device_store_waited"] = True
+            return
+        elif not webui_auth.restore_session_from_device(device_state.get("vault")):
+            webui_auth.render_auth_screen(tr)
+            return
+        signed_in = webui_auth.current_user()
+        if signed_in and not st.session_state.get("user_keys_applied"):
+            _apply_saved_user_keys(signed_in["id"])
+            st.session_state["user_keys_applied"] = True
     _restore_secret_widgets_from_config()
     _render_top_bar()
     restored_count = st.session_state.pop("device_keys_restored_count", None)

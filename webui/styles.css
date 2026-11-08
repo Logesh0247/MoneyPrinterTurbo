@@ -1,3 +1,24 @@
+.mpt-auth-hero {
+    max-width: 28rem;
+    margin: 1.5rem auto 0.75rem;
+    text-align: center;
+}
+.mpt-auth-hero h1 {
+    font-size: 1.6rem;
+    margin-bottom: 0.35rem;
+}
+.mpt-auth-hero p {
+    color: var(--text-color, inherit);
+    opacity: 0.82;
+    margin: 0;
+    line-height: 1.45;
+}
+
+div[class*="st-key-auth_screen"] {
+    max-width: 28rem;
+    margin: 0 auto 2rem;
+}
+
 /* The device key store is a zero-height iframe that talks to localStorage.
    Keep it out of the layout, especially on phones where extra chrome is costly. */
 div[class*="st-key-mpt_device_key_store"],
