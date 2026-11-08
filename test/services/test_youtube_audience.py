@@ -192,3 +192,11 @@ def test_real_http_multipart_audience(tmp_path, upload_config, selected):
         worker.join(timeout=5)
     assert received[0]["selfDeclaredMadeForKids"] == (b"true" if selected else b"false")
     assert received[0]["video"] == b"multipart-test-media"
+
+
+# Legacy adapter unit tests simulate a permissive boundary; production Safe Mode
+# remains fail-closed and is tested separately in test_youtube_safety.py.
+@pytest.fixture(autouse=True)
+def _legacy_adapter_boundary(monkeypatch):
+    from app.services import youtube_safety
+    monkeypatch.setattr(youtube_safety, "is_youtube_target", lambda platforms: False)

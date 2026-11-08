@@ -40,3 +40,24 @@ def test_word_after_split_long_token_still_wraps_when_it_does_not_fit():
     lines = wrapped.splitlines()
     assert all(_width(font, line) <= 400 for line in lines)
     assert "".join(lines).replace(" ", "") == text.replace(" ", "")
+
+
+def test_wrap_reuses_width_measurements_within_one_subtitle(monkeypatch):
+    from app.services import video
+
+    real_font = ImageFont.truetype(FONT_PATH, 60)
+    calls = []
+
+    class CountingFont:
+        def getmetrics(self):
+            return real_font.getmetrics()
+
+        def getbbox(self, text):
+            calls.append(text)
+            return real_font.getbbox(text)
+
+    monkeypatch.setattr(video.ImageFont, "truetype", lambda *args, **kwargs: CountingFont())
+    width = _width(real_font, "hello") + 1
+    wrapped, _ = video.wrap_text("hello hello hello", width, font=FONT_PATH, fontsize=60)
+    assert wrapped == "hello\nhello\nhello"
+    assert calls.count("hello") == 1

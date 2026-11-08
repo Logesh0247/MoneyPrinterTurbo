@@ -12,6 +12,14 @@ services:
     command: [ "streamlit", "run", "./webui/Main.py", "--server.address=0.0.0.0", "--server.port=8501", "--browser.serverAddress=127.0.0.1", "--server.enableCORS=True", "--browser.gatherUsageStats=False", "--client.toolbarMode=minimal", "--logger.hideWelcomeMessage=True", "--server.showEmailPrompt=False" ]
     volumes: *common-volumes
     restart: always
+  scheduler:
+    profiles: ["scheduler"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python3", "-m", "app.services.daily_queue"]
+    volumes: *common-volumes
+    restart: unless-stopped
   api:
     build:
       context: .

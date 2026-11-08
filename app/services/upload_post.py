@@ -181,16 +181,22 @@ class UploadPostService:
         youtube_extra: Optional[dict] = None,
         on_background_start: Callable[[str], None] | None = None,
     ) -> dict:
+        from app.services import youtube_safety
+
+        if platforms is None:
+            platforms = self.platforms
         if not self.is_configured():
             logger.warning("Upload-Post is not configured. Skipping cross-post.")
             return {"success": False, "error": "Upload-Post not configured"}
 
-        if platforms is None:
-            platforms = self.platforms
-
         if not os.path.exists(video_path):
             logger.error(f"Video file not found: {video_path}")
             return {"success": False, "error": f"Video file not found: {video_path}"}
+
+        # Guard the network boundary itself so no caller can bypass Safe Mode.
+        if youtube_safety.is_youtube_target(platforms):
+            logger.warning(youtube_safety.BLOCK_REASON)
+            return {"success": False, "error": youtube_safety.BLOCK_REASON}
 
         has_youtube = any(p.startswith("youtube") for p in platforms)
         if has_youtube:

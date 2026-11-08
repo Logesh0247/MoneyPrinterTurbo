@@ -1083,6 +1083,7 @@ def generate_final_videos(
                 task_id, _progress, _progress + combine_share
             ),
             **batch_options,
+            **({"high_quality": True} if params.video_quality == "high" else {}),
         )
         if allocate_batch_materials:
             selected_sources = list(dict.fromkeys(used_video_paths))
@@ -1318,6 +1319,10 @@ def _run_cross_post(
                 )
             return
 
+        from app.services import youtube_safety
+        if youtube_safety.is_youtube_target(platforms):
+            _record_cross_post_failure(task_id, RuntimeError(youtube_safety.BLOCK_REASON))
+            return
         logger.info(
             f"cross-post started, task_id: {task_id}, platforms: {', '.join(platforms)}"
         )

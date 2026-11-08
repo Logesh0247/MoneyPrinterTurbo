@@ -630,6 +630,7 @@ def concat_video_clips_with_ffmpeg(
     threads: int,
     output_dir: str,
     max_duration: float | None = None,
+    high_quality: bool = False,
 ):
     # Separate renders may share a directory. Each FFmpeg process must keep its
     # own manifest until all codec attempts finish, without overwriting or
@@ -672,6 +673,8 @@ def concat_video_clips_with_ffmpeg(
             "-pix_fmt",
             "yuv420p",
         ]
+        if high_quality and codec == "libx264":
+            command.extend(["-crf", "18"])
         if max_duration is not None and max_duration > 0:
             command.extend(["-t", f"{max_duration:.3f}"])
         command.append(staged_output)
@@ -694,7 +697,9 @@ def concat_video_clips_with_ffmpeg(
             dir=os.path.dirname(os.path.abspath(output_file)),
         )
         os.close(descriptor)
-        effective_codec = _get_effective_video_codec()
+        # The high profile uses libx264 consistently across all render stages;
+        # hardware encoders do not share a portable CRF quality scale.
+        effective_codec = _DEFAULT_VIDEO_CODEC if high_quality else _get_effective_video_codec()
         try:
             result_codec = run_concat(effective_codec)
         except TimeoutError:
@@ -989,6 +994,7 @@ def combine_videos(
     source_groups: dict[str, str] | None = None,
     used_video_paths: List[str] | None = None,
     progress_callback: Callable[[float], None] | None = None,
+    high_quality: bool = False,
 ) -> str:
     # Direct callers and persisted tasks can still supply the raw string.
     # Normalize it once for all downstream enum access.
@@ -1169,9 +1175,11 @@ def combine_videos(
             _write_videofile_with_codec_fallback(
                 clip,
                 clip_file,
-                codec=_get_configured_video_codec(),
+                codec=_DEFAULT_VIDEO_CODEC if high_quality else _get_configured_video_codec(),
                 logger=None,
                 fps=fps,
+                **({"ffmpeg_params": [*_BT709_FFMPEG_PARAMS, "-crf", "18"]}
+                   if high_quality else {}),
             )
 
             clip_duration_saved = clip.duration
@@ -1279,6 +1287,7 @@ def combine_videos(
             threads=threads,
             output_dir=output_dir,
             max_duration=audio_duration,
+            **({"high_quality": True} if high_quality else {}),
         )
         if used_video_paths is not None:
             # Exclude safety-margin clips that FFmpeg trims entirely from the output.
@@ -1352,6 +1361,9 @@ def wrap_text(text, max_width, font="Arial", fontsize=60, *, shaped=None, fallba
         )
         line_height = max(1, int(fontsize))
 
+    # Wrapping often measures the same word more than once. Keep this cache
+    # local to the call so font changes and other tasks never reuse stale widths.
+    @lru_cache(maxsize=512)
     def get_text_size(inner_text):
         inner_text = inner_text.strip()
         if not inner_text:
@@ -1952,18 +1964,24 @@ def generate_video(
 
         final_video_clip = video_clip.with_audio(audio_clip)
         clip_stack.callback(final_video_clip.close)
-        # 显式沿用输入音频的采样率；如果取不到，再回退 MoviePy 默认的 44100Hz。
-        # 这样可以减少不同环境，尤其 Docker 中再次重采样带来的音质波动。
-        output_audio_fps = int(getattr(audio_clip, "fps", 0) or 44100)
+        # Standard preserves the source sample rate. The high-quality export
+        # uses 48 kHz, a common delivery rate; resampling cannot restore missing
+        # detail from a low-quality original recording.
+        output_audio_fps = (
+            48000 if params.video_quality == "high"
+            else int(getattr(audio_clip, "fps", 0) or 44100)
+        )
         with _stage_heartbeat("final video render"):
             _write_videofile_with_codec_fallback(
                 final_video_clip,
                 output_file=output_file,
-                codec=_get_configured_video_codec(),
+                codec=_DEFAULT_VIDEO_CODEC if params.video_quality == "high" else _get_configured_video_codec(),
                 atomic_output=True,
                 audio_codec=audio_codec,
                 audio_fps=output_audio_fps,
-                audio_bitrate=audio_bitrate,
+                audio_bitrate="256k" if params.video_quality == "high" else audio_bitrate,
+                **({"ffmpeg_params": [*_BT709_FFMPEG_PARAMS, "-crf", "18", "-movflags", "+faststart"]}
+                   if params.video_quality == "high" else {}),
                 temp_audiofile_path=_get_temp_audio_dir(output_dir),
                 threads=params.n_threads or 2,
                 logger=None,

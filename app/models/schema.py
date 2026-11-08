@@ -120,6 +120,8 @@ class VideoParams(BaseModel):
     video_clip_speed: Optional[float] = 1.0
     match_materials_to_script: bool = False
     video_count: int = Field(default=1, ge=1)
+    # Optional quality profile; standard preserves existing render behavior.
+    video_quality: Literal["standard", "high"] = "standard"
 
     video_source: Optional[str] = "pexels"
     video_materials: Optional[List[MaterialInfo]] = (

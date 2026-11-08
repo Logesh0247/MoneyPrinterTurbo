@@ -1,4 +1,5 @@
 import ast
+import heapq
 import json
 import os
 import re
@@ -248,6 +249,7 @@ def test_history_scan_skips_non_object_script_payload(tmp_path, payload):
     namespace = {
         "os": os,
         "json": json,
+        "heapq": heapq,
         "logger": MagicMock(),
         "utils": SimpleNamespace(task_dir=lambda: str(tasks_root)),
         "const": const,
@@ -269,3 +271,29 @@ def test_find_final_task_video_ignores_directories_and_broken_links(tmp_path):
     assert find_final_task_video(str(tmp_path)) == ""
     (tmp_path / "final-3.mp4").touch()
     assert find_final_task_video(str(tmp_path)) == str(tmp_path / "final-3.mp4")
+
+
+def test_history_scan_keeps_newest_entries_in_stable_order(tmp_path):
+    tasks_root = tmp_path / "tasks"
+    tasks_root.mkdir()
+    for index in range(8):
+        task = tasks_root / f"task-{index}"
+        task.mkdir()
+        os.utime(task, (100 + index // 2, 100 + index // 2))
+    # Use the same filesystem iteration order as the scan for timestamp ties.
+    with os.scandir(tasks_root) as entries:
+        expected = sorted(
+            ((e.stat().st_mtime, e.name) for e in entries),
+            key=lambda item: item[0], reverse=True,
+        )[:3]
+
+    tree = ast.parse(WEBUI_MAIN.read_text(encoding="utf-8"))
+    selected = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                and node.name in {"_safe_load_task_script", "_scan_history_tasks"}]
+    namespace = {"os": os, "json": json, "heapq": heapq, "logger": MagicMock(),
+                 "utils": SimpleNamespace(task_dir=lambda: str(tasks_root)),
+                 "const": const, "_find_final_task_video": lambda _: ""}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=selected, type_ignores=[])),
+                 str(WEBUI_MAIN), "exec"), namespace)
+    result = namespace["_scan_history_tasks"](limit=3)
+    assert [item["task_id"] for item in result] == [name for _, name in expected]

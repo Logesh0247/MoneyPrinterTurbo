@@ -1,4 +1,5 @@
 import hashlib
+import heapq
 import html
 import json
 import math
@@ -1027,9 +1028,16 @@ def _scan_history_tasks(limit=30):
         logger.warning(f"failed to scan task directory: {tasks_root}, {e}")
         return []
 
-    task_entries.sort(key=lambda item: item[0], reverse=True)
+    # Only the newest entries are displayed. A bounded selection avoids sorting
+    # the entire history on every task-panel refresh. nlargest preserves input
+    # order for equal timestamps, just like the previous stable sort.
+    if limit >= 0:
+        task_entries = heapq.nlargest(limit, task_entries, key=lambda item: item[0])
+    else:
+        task_entries.sort(key=lambda item: item[0], reverse=True)
+        task_entries = task_entries[:limit]
     tasks = []
-    for mtime, name, task_path in task_entries[:limit]:
+    for mtime, name, task_path in task_entries:
         script_data = _safe_load_task_script(task_path)
         params_data = script_data.get("params", {})
         if not isinstance(params_data, dict):
@@ -1446,6 +1454,232 @@ def _render_task_video_preview():
         st.session_state.pop("task_preview_video_file", None)
         return
     st.video(preview_file)
+    st.caption("Review the video, facts, rights and metadata before publishing. Automatic publishing does not wait for this check.")
+    if st.button("Check video quality", key="check_task_video_quality"):
+        from app.services.video_quality import inspect_video
+
+        with st.spinner("Checking video…"):
+            try:
+                stat = os.stat(preview_file)
+                report = inspect_video(preview_file)
+                st.session_state["task_video_quality"] = (
+                    preview_file, stat.st_mtime_ns, stat.st_size, report
+                )
+            except OSError:
+                st.session_state.pop("task_video_quality", None)
+                st.error("The video is no longer available.")
+    cached = st.session_state.get("task_video_quality")
+    try:
+        stat = os.stat(preview_file)
+        current_file = (preview_file, stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        current_file = None
+    if cached and current_file == cached[:3]:
+        report = cached[3]
+        if report["ok"]:
+            details = report["details"]
+            st.success(f"Video readable: {details['width']} × {details['height']}, {details['duration_seconds']} seconds, {details['fps']} fps.")
+        for warning in report["warnings"]:
+            st.warning(warning)
+        for error in report["errors"]:
+            st.error(error)
+        st.caption("Only three frames and short audio samples are checked. This cannot verify full-file quality, sync, subtitles, facts, copyright or upload readiness.")
+
+    _render_reviewed_youtube_publish(task_name, preview_file)
+
+
+def _render_youtube_safety_status():
+    from app.services import youtube_safety
+
+    panel = st.expander("YouTube Safe Mode status", key="youtube_safety_status", on_change="rerun")
+    if not panel.open:
+        return
+    with panel:
+        report = youtube_safety.safety_report()
+        st.error(report["reason"])
+        st.write("Final status: BLOCKED · Quality score: not available")
+        st.caption("Sampled video checks are advisory; none of the mandatory checks below has been verified by this system.")
+        for name, status in report["checks"].items():
+            st.write(f"{status} — {name}")
+        st.caption("Channel brief, source records, human approvals, official OAuth uploads, quota checks and post-upload verification are not implemented.")
+
+
+def _render_cinematic_scene_feature():
+    """Optional scene-to-video route; keep the provider's own audio intact."""
+    from app.services import cinematic_scene
+
+    panel = st.expander("Optional: Cinematic scene with dialogue", key="cinematic_scene_panel", on_change="rerun")
+    if not panel.open:
+        return
+    with panel:
+        st.caption("Send a complete scene prompt to a compatible native-audio video model. The generated video and sound are preserved together; this does not use separate narration or auto-publish.")
+        st.warning("This is a paid provider request. Native speech, lip sync, duration, resolution and visual consistency depend on the selected model and are not guaranteed. Check provider pricing and account/model support before submitting.")
+        try:
+            endpoint = cinematic_scene.prepare_endpoint()
+            st.caption(f"Provider: {endpoint.display_name} · Model: {endpoint.model} · Resolution: {endpoint.resolution}")
+        except Exception:
+            st.info("Configure Jalapeno Cloud under Settings → Material API and choose a model that supports native audio before generating a scene.")
+            return
+        with st.form("cinematic_scene_form"):
+            prompt = st.text_area("Scene, characters, action and dialogue", height=250, max_chars=12000,
+                                  placeholder="Describe the setting, characters, dialogue, camera, style and sound…")
+            duration = st.number_input("Requested duration (seconds)", min_value=endpoint.min_duration,
+                                       max_value=endpoint.max_duration,
+                                       value=min(max(10, endpoint.min_duration), endpoint.max_duration), step=1)
+            aspect = st.selectbox("Aspect ratio", options=[VideoAspect.landscape.value, VideoAspect.portrait.value, VideoAspect.square.value])
+            confirm = st.checkbox("I have checked that this model supports native audio and accept the provider's charges.")
+            submitted = st.form_submit_button("Generate cinematic scene")
+        if submitted:
+            if not confirm:
+                st.error("Confirm model support and charges before generating.")
+            else:
+                try:
+                    task_id = str(uuid4())
+                    task_id = webui_task.submit_cinematic_scene(task_id, prompt, int(duration), aspect, endpoint)
+                    st.session_state["cinematic_scene_task_id"] = task_id
+                    st.success("Scene queued. Check Task Manager for progress and the result.")
+                except Exception as exc:
+                    st.error(f"Could not queue the scene ({type(exc).__name__}). Check the prompt and provider settings.")
+        task_id = st.session_state.get("cinematic_scene_task_id")
+        if task_id:
+            task = sm.state.get_task(task_id) or {}
+            if task.get("state") == const.TASK_STATE_FAILED:
+                st.error(task.get("error") or "Scene generation failed. Check the provider before retrying.")
+            elif task.get("state") == const.TASK_STATE_COMPLETE:
+                st.success("Scene generated. Review dialogue, lip sync and visuals before using it.")
+                for warning in task.get("warnings") or []:
+                    st.warning(str(warning))
+                for video_file in task.get("videos") or []:
+                    if os.path.isfile(video_file):
+                        st.video(video_file)
+            else:
+                st.info("Scene is queued or processing. Check Task Manager and the provider for status.")
+
+
+def _render_daily_script_queue(params, uploaded_files, uploaded_audio_file, uploaded_bgm_file, voice_mode):
+    from app.services import daily_queue, upload_post
+
+    queue_panel = st.expander(
+        "Optional: Daily YouTube script queue",
+        key="daily_script_queue_panel",
+        on_change="rerun",
+    )
+    if not queue_panel.open:
+        return
+    with queue_panel:
+        st.caption("Optional feature; regular video generation works independently. Prepare one video at a time and publish at 6:00 PM Asia/Kolkata. A separate scheduler must be running continuously. Missed slots are deferred to the next day.")
+        st.warning("Automatic publishing can incur charges and publish without review. Verify scripts, rights and YouTube settings before enabling. Disable legacy Auto-Publish to prevent duplicate uploads.")
+        try:
+            queue = daily_queue.read_queue()
+        except Exception:
+            st.error("Unable to read the daily queue. Check server logs and storage.")
+            return
+        enabled = queue.get("enabled", False)
+        st.write("Queue: " + ("Enabled" if enabled else "Paused"))
+        service = upload_post.upload_post_service
+        if not service.is_configured() or service.auto_upload:
+            st.warning("Configure and enable Upload-Post, and turn off Enable Auto-Publish. The scheduler will not run until both conditions are met.")
+        from app.services import youtube_safety
+        blocked = not youtube_safety.official_youtube_publishing_available()
+        if blocked:
+            st.error(youtube_safety.BLOCK_REASON)
+        if st.button("Pause queue" if enabled else "Enable queue", key="daily_queue_toggle", disabled=blocked and not enabled):
+            daily_queue.set_enabled(not enabled)
+            st.rerun()
+        st.caption("Add scripts in order. Put a title on the first line, followed by the script. Separate entries with a line containing three dashes (---). Current video and voice settings are saved with each item.")
+        with st.form("daily_queue_add"):
+            text = st.text_area("Scripts", height=180, max_chars=200000, placeholder="Title of first video\nScript text...\n---\nTitle of second video\nScript text...")
+            privacy = st.selectbox("YouTube visibility", ["private", "unlisted", "public"], key="daily_queue_privacy")
+            audience = st.selectbox("YouTube audience", ["Select an audience", "Not made for kids", "Made for kids"], key="daily_queue_audience")
+            submit = st.form_submit_button("Add scripts to queue")
+        if submit:
+            try:
+                if audience == "Select an audience":
+                    raise ValueError("Select the YouTube audience.")
+                if uploaded_files or uploaded_audio_file or uploaded_bgm_file or voice_mode != "tts":
+                    raise ValueError("Use a configured TTS voice and stock footage; uploaded assets are not supported by the daily queue yet.")
+                chunks = re.split(r"(?m)^\s*---\s*$", text.strip())
+                scripts = []
+                for chunk in chunks:
+                    lines = chunk.strip().split("\n", 1)
+                    if len(lines) != 2:
+                        raise ValueError("Each entry needs a title on its first line and a script below it.")
+                    scripts.append((lines[0], lines[1]))
+                daily_queue.enqueue(scripts, params.model_dump(mode="json"), privacy, audience == "Made for kids")
+                st.success(f"Added {len(scripts)} scripts.")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+        for item in queue.get("items", []):
+            with st.container(border=True):
+                st.write(f"{item.get('title', '')} — {item.get('status', 'unknown')}")
+                if item.get("error"):
+                    st.warning(item["error"])
+                if item.get("request_id"):
+                    st.caption(f"Upload-Post request ID: {item['request_id']}")
+                if not enabled and item.get("status") in {"queued", "ready", "failed", "interrupted", "unconfirmed"}:
+                    if item.get("status") in {"interrupted", "unconfirmed"}:
+                        st.caption("Check the task and Upload-Post/YouTube before skipping: an upload or paid generation may already have happened.")
+                    if st.button("Skip item", key=f"daily_skip_{item['id']}"):
+                        daily_queue.skip_item(item["id"])
+                        st.rerun()
+
+
+def _render_reviewed_youtube_publish(task_id, video_file):
+    """Explicit opt-in publishing; independent of legacy auto-publishing."""
+    from filelock import Timeout
+    from app.services import review_publish, upload_post
+
+    with st.expander("Review and publish to YouTube"):
+        from app.services import youtube_safety
+        if not youtube_safety.official_youtube_publishing_available():
+            st.error(youtube_safety.BLOCK_REASON)
+            st.caption("No upload is permitted, including private uploads, until the mandatory checks and official uploader are available.")
+            return
+        st.caption("Disable auto-publishing for this workflow. Check the video, its facts, rights and YouTube settings before submitting. Uploads can take several minutes.")
+        try:
+            status = review_publish.get_review_status(task_id, video_file)
+        except (review_publish.ReviewPublishError, ValueError):
+            st.warning("Only completed task videos can be published here.")
+            return
+        if status:
+            st.info(f"Reviewed upload status: {status.get('status', 'unconfirmed')}")
+            if status.get("request_id"):
+                st.caption(f"Upload-Post request ID: {status['request_id']}")
+            st.warning("An upload was already attempted. Check Upload-Post and YouTube before taking further action; this workflow will not retry automatically.")
+            return
+        service = upload_post.upload_post_service
+        if not service.is_configured() or service.auto_upload:
+            st.warning("Enable and configure Upload-Post, and turn off Enable Auto-Publish in Auto-Publish Settings.")
+            return
+        metadata = _safe_load_task_script(os.path.dirname(video_file))
+        params = metadata.get("params") if isinstance(metadata.get("params"), dict) else {}
+        suggested_title = str(params.get("video_subject") or "")[:100]
+        with st.form(f"review_youtube_{task_id}"):
+            title = st.text_input("YouTube title", value=suggested_title, max_chars=100)
+            description = st.text_area("YouTube description", max_chars=5000)
+            privacy = st.selectbox("Visibility", ["private", "unlisted", "public"])
+            audience = st.selectbox("Audience", ["Select an audience", "Not made for kids", "Made for kids"])
+            confirmed = st.checkbox("I reviewed the video, metadata, facts and rights, and checked that it was not previously uploaded.")
+            submitted = st.form_submit_button("Publish reviewed video to YouTube")
+        if submitted:
+            if not confirmed or audience == "Select an audience":
+                st.error("Confirm your review and select an audience before publishing.")
+                return
+            try:
+                with st.spinner("Publishing; do not submit again while the result is pending…"):
+                    result = review_publish.publish_reviewed(
+                        task_id, video_file, title=title, description=description,
+                        privacy=privacy, made_for_kids=(audience == "Made for kids"),
+                    )
+                if result["status"] == "complete":
+                    st.success("Upload-Post reported successful publishing.")
+                else:
+                    st.warning("Upload outcome is unconfirmed. Check Upload-Post and YouTube before retrying.")
+                if result.get("request_id"):
+                    st.caption(f"Upload-Post request ID: {result['request_id']}")
+            except (review_publish.ReviewPublishError, Timeout) as exc:
+                st.error(str(exc) if isinstance(exc, review_publish.ReviewPublishError) else "Another publish attempt is already running.")
 
 
 @st.fragment(run_every="2s")
@@ -1600,6 +1834,7 @@ def _apply_restored_params(params):
         utils.normalize_clip_speed(params.get("video_clip_speed", 1.0)),
     )
     _set_stable_widget_value("video_count_select", params.get("video_count", 1))
+    _set_stable_widget_value("video_quality_select", params.get("video_quality", "standard"))
     st.session_state["match_materials_to_script"] = bool(
         params.get("match_materials_to_script", False)
     )
@@ -4256,6 +4491,8 @@ def _render_settings_dialog():
 
         with publish_config_panel:
             if publish_config_panel.open:
+                from app.services import youtube_safety
+                st.warning(youtube_safety.BLOCK_REASON)
                 st.write(
                     tr(
                         "Automatically publish generated videos to social media using upload-post.com"
@@ -6330,6 +6567,19 @@ def _render_video_settings(panel, params):
                 key="video_count_select",
             )
             _set_runtime_config("ui", "video_count", params.video_count)
+
+            quality_options = ["standard", "high"]
+            params.video_quality = stable_selectbox(
+                "Output quality",
+                options=quality_options,
+                default_value=_saved_ui_choice("video_quality", quality_options, "standard"),
+                key="video_quality_select",
+                format_func=lambda value: "High quality (slower, larger files)" if value == "high" else "Standard",
+                help="High uses CPU H.264 with less compression and 256 kbps AAC; source quality and YouTube processing still affect the result. It may take longer to render.",
+            )
+            _set_runtime_config("ui", "video_quality", params.video_quality)
+            if params.video_quality == "high":
+                st.caption("High quality uses libx264 CPU encoding regardless of the encoder selected below.")
 
             video_codec_options = [
                 (tr("Default Video Encoder"), DEFAULT_VIDEO_CODEC_OPTION),
@@ -9496,6 +9746,11 @@ def _render_application():
         uploaded_bgm_file,
         voice_mode,
     )
+    _render_daily_script_queue(
+        params, uploaded_files, uploaded_audio_file, uploaded_bgm_file, voice_mode
+    )
+    _render_cinematic_scene_feature()
+    _render_youtube_safety_status()
 
     # 生成分支在启动后台线程前已经请求过保存。普通控件交互继续请求非阻塞保存；
     # 如果后台任务正在使用配置，配置层会在任务结束时自动应用并落盘最新值。

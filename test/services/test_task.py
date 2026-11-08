@@ -1,3 +1,4 @@
+import pytest
 import unittest
 import os
 import shutil
@@ -2604,3 +2605,11 @@ class TestTaskService(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# Test the existing mocked cross-post orchestration behind a simulated
+# permissive boundary. Real YouTube publishing remains blocked by Safe Mode.
+@pytest.fixture(autouse=True)
+def _legacy_cross_post_boundary(monkeypatch):
+    from app.services import youtube_safety
+    monkeypatch.setattr(youtube_safety, "is_youtube_target", lambda platforms: False)
