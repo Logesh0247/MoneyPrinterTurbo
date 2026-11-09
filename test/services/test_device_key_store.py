@@ -1,8 +1,12 @@
+from pathlib import Path
+
 from webui.device_key_store import (
     backup_has_credentials,
+    build_device_vault,
     is_blank_value,
     is_credential_key,
     keys_to_apply,
+    merge_device_vault,
 )
 
 
@@ -64,3 +68,37 @@ def test_device_store_ignores_empty_or_invalid_payloads():
     assert keys_to_apply(None, {}) == {}
     assert keys_to_apply({}, {"app": {"openai_api_key": "sk"}}) == {}
     assert keys_to_apply("not-a-dict", {}) == {}
+
+
+def test_partial_vault_write_keeps_existing_keys():
+    existing = build_device_vault(
+        account={"id": "user-1"},
+        session_token="old-token",
+        keys_backup={"keys": {"app": {"openai_api_key": "sk-keep"}}},
+    )
+    incoming = build_device_vault(account={"id": "user-1"}, session_token="new-token")
+    merged = merge_device_vault(existing, incoming)
+    assert merged["session_token"] == "new-token"
+    assert merged["keys_backup"]["keys"]["app"]["openai_api_key"] == "sk-keep"
+
+
+def test_device_store_iframe_merges_partial_writes():
+    html = (
+        Path("webui/components/device_key_store/index.html")
+        .read_text(encoding="utf-8")
+    )
+    assert "function mergeStore(" in html
+    assert "incoming.replace" in html
+    assert "base.keys_backup" in html
+
+
+def test_sign_out_replace_clears_remembered_keys():
+    existing = build_device_vault(
+        account={"id": "user-1"},
+        keys_backup={"keys": {"app": {"openai_api_key": "sk-old"}}},
+    )
+    incoming = build_device_vault(replace=True)
+    merged = merge_device_vault(existing, incoming)
+    assert "keys_backup" not in merged
+    assert "replace" not in merged
+    assert incoming["replace"] is True

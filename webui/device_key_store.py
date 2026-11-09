@@ -96,8 +96,36 @@ def build_device_vault(account=None, session_token=None, keys_backup=None, repla
     if isinstance(keys_backup, dict) and keys_backup.get("keys"):
         vault["keys_backup"] = keys_backup
     if replace:
+        # Sign-out must replace the whole browser copy, including keys.
+        vault["replace"] = True
         return vault
     return vault if ("account" in vault or "session_token" in vault or "keys_backup" in vault) else None
+
+
+def merge_device_vault(existing, incoming):
+    """Keep omitted account/session/keys when a partial vault is written.
+
+    The settings dialog and cookie refresh often send only the fields they
+    changed. Replacing localStorage wholesale would drop API keys the user
+    just pasted, or drop the session when a keys-only payload is saved.
+    """
+    if not isinstance(incoming, dict):
+        return existing if isinstance(existing, dict) else None
+    if incoming.get("replace"):
+        stored = dict(incoming)
+        stored.pop("replace", None)
+        return stored
+    existing = existing if isinstance(existing, dict) else {}
+    merged = dict(existing)
+    merged.update(incoming)
+    merged.pop("replace", None)
+    if not incoming.get("keys_backup") and existing.get("keys_backup"):
+        merged["keys_backup"] = existing["keys_backup"]
+    if not incoming.get("account") and existing.get("account"):
+        merged["account"] = existing["account"]
+    if not incoming.get("session_token") and existing.get("session_token"):
+        merged["session_token"] = existing["session_token"]
+    return merged
 
 
 def keys_to_apply(stored_keys, current_keys):
@@ -167,7 +195,9 @@ def device_key_store_available():
     return _component() is not None
 
 
-def render_device_key_store(payload_to_save=None, session_token=_UNSET):
+def render_device_key_store(
+    payload_to_save=None, session_token=_UNSET, component_key=COMPONENT_KEY
+):
     """
     Read this device's remembered keys and optionally overwrite them.
 
@@ -175,6 +205,8 @@ def render_device_key_store(payload_to_save=None, session_token=_UNSET):
     browser replies, the value is ``{"ready": True, "payload": ...}``. Passing
     ``payload_to_save=None`` never clears localStorage. Pass ``session_token=""``
     to delete the session cookie; omit it to leave the cookie unchanged.
+    ``component_key`` must differ when the iframe is rendered from both the
+    main page and the settings dialog in the same run.
     """
     component = _component()
     if component is None:
@@ -182,7 +214,7 @@ def render_device_key_store(payload_to_save=None, session_token=_UNSET):
     kwargs = {
         "payload_to_save": payload_to_save,
         "default": None,
-        "key": COMPONENT_KEY,
+        "key": component_key or COMPONENT_KEY,
     }
     if session_token is not _UNSET:
         kwargs["session_token"] = "" if session_token is None else str(session_token)
