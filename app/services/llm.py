@@ -334,6 +334,10 @@ def _generate_response(
 
         logger.info(f"llm provider: {llm_provider}")
         api_key = runtime_app_config.get(provider.config_key("api_key"), "")
+        if provider.requires_api_key and not str(api_key or "").strip():
+            from app.config.env_settings import api_key_from_environment
+
+            api_key = api_key_from_environment(llm_provider)
         configured_model = runtime_app_config.get(provider.config_key("model_name"), "")
         model_name = provider.resolve_model_name(configured_model)
         if configured_model and model_name != configured_model:
