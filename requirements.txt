@@ -23,6 +23,7 @@ python-multipart==0.0.30
 pyyaml==6.0.3
 requests==2.33.1
 PyJWT[crypto]>=2.10.1,<3
+argon2-cffi>=23.1.0,<26
 filelock>=4.2.1,<5
 packaging==24.2
 socksio==1.0.0

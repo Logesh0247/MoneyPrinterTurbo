@@ -9,6 +9,7 @@ from dataclasses import asdict
 from loguru import logger
 
 from app.config import config
+from app.controllers.manager.base_manager import TaskQueueFullError
 from app.controllers.manager.memory_manager import InMemoryTaskManager
 from app.models import const
 from app.models.schema import VideoParams
@@ -161,7 +162,9 @@ def _run_generation(
         # tm.start 已负责把流水线异常转换成失败状态；这里额外保护日志 sink、
         # 配置锁等 WebUI 包装层。任何后台线程异常都必须留下终态，不能让任务
         # 管理器在工作线程退出后仍永久显示“生成中”。
-        error = f"{type(exc).__name__}: {exc}"
+        # SDK, lock and transport exceptions can include tokens or signed URLs.
+        # Keep the exception type and stage, never the untrusted message/traceback.
+        error = f"WebUI worker failed ({type(exc).__name__}); check server diagnostics."
         failure = {
             "task_id": task_id,
             "state": const.TASK_STATE_FAILED,
@@ -169,17 +172,22 @@ def _run_generation(
             "failed_stage": "webui_worker",
             "error": error,
         }
-        sm.state.update_task(
-            task_id,
-            state=failure["state"],
-            progress=failure["progress"],
-            failed_stage=failure["failed_stage"],
-            error=failure["error"],
-        )
-        logger.exception(
-            f"unexpected WebUI generation worker failure, "
-            f"task_id={task_id}, error={exc}"
-        )
+        try:
+            current = sm.state.get_task(task_id) or {}
+            failure["progress"] = current.get("progress", 0)
+            # Only patch an existing task; a deleted task must not reappear.
+            sm.state.patch_task(
+                task_id,
+                state=failure["state"],
+                progress=failure["progress"],
+                failed_stage=failure["failed_stage"],
+                error=failure["error"],
+            )
+        except Exception as state_exc:
+            logger.error("failed to persist WebUI worker failure, task_id={}, type={}",
+                         task_id, type(state_exc).__name__)
+        logger.error("unexpected WebUI worker failure, task_id={}, type={}",
+                     task_id, type(exc).__name__)
         return failure
     finally:
         with _submission_lock:
@@ -324,18 +332,24 @@ def _enqueue_generation(
     except Exception as exc:
         # 调度失败与流水线失败一样必须成为可查询状态，避免任务管理器永久显示
         # “生成中”。保留异常类型便于从 Docker 或本机日志快速定位队列问题。
-        error = f"{type(exc).__name__}: {exc}"
-        sm.state.update_task(
-            task_id,
-            state=const.TASK_STATE_FAILED,
-            progress=0,
-            failed_stage="scheduling",
-            error=error,
-        )
-        logger.exception(
-            f"failed to submit WebUI generation task, task_id={task_id}, error={exc}"
-        )
-        raise
+        error = ("Task queue is full; try again later." if isinstance(exc, TaskQueueFullError)
+                 else f"WebUI scheduling failed ({type(exc).__name__}); check server diagnostics.")
+        try:
+            sm.state.patch_task(
+                task_id,
+                state=const.TASK_STATE_FAILED,
+                progress=0,
+                failed_stage="scheduling",
+                error=error,
+            )
+        except Exception as state_exc:
+            logger.error("failed to persist scheduling failure, task_id={}, type={}",
+                         task_id, type(state_exc).__name__)
+        logger.error("failed to submit WebUI generation task, task_id={}, type={}",
+                     task_id, type(exc).__name__)
+        if isinstance(exc, TaskQueueFullError):
+            raise TaskQueueFullError(error) from None
+        raise RuntimeError(error) from None
 
 
 # Native-audio scenes share the WebUI generation queue but do not enter the

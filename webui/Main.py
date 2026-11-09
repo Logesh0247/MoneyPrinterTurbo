@@ -2108,6 +2108,33 @@ def _render_brand(available_update: str | None = None):
     )
 
 
+@st.dialog("Account", width="small")
+def _render_account_profile():
+    user = webui_auth.current_user()
+    if not user:
+        st.error(tr("Login Required"))
+        return
+    st.caption(user.get("email") or "")
+    st.text(f"Account ID: {user['id']}")
+    st.text(f"Created: {user.get('created_at') or '—'}")
+    st.text(f"Last sign-in: {user.get('last_login_at') or '—'}")
+    with st.form("account_profile_form"):
+        name = st.text_input(tr("Display Name"), value=user.get("display_name") or "", max_chars=80)
+        submitted = st.form_submit_button("Save profile", type="primary", use_container_width=True)
+    if submitted:
+        try:
+            updated = user_accounts.update_display_name(st.session_state.get("session_token"), name)
+        except user_accounts.UserAccountError as exc:
+            st.error(tr(exc.code))
+        except Exception as exc:
+            logger.error("profile update failed: {}", type(exc).__name__)
+            st.error(tr("Auth Storage Error"))
+        else:
+            st.session_state["current_user"] = updated
+            st.session_state["profile_saved"] = True
+            st.rerun()
+
+
 def _render_top_bar():
     """渲染品牌、任务管理、设置和语言切换组成的页面顶部栏。"""
     # 顶部栏分为品牌区和操作区两个独立区域。窄屏下由 Streamlit
@@ -2140,14 +2167,16 @@ def _render_top_bar():
 
             signed_in = webui_auth.current_user()
             if signed_in:
-                st.button(
+                if st.session_state.pop("auth_logout_error", False):
+                    st.error(tr("Auth Storage Error"))
+                if st.button(
                     signed_in.get("display_name") or signed_in.get("email") or tr("Sign Out"),
                     key="signed_in_user_button",
                     type="tertiary",
                     icon=":material/account_circle:",
                     width="content",
-                    disabled=True,
-                )
+                ):
+                    _render_account_profile()
                 st.button(
                     tr("Sign Out"),
                     key="sign_out_button",
@@ -2438,6 +2467,31 @@ def _render_generation_activity(task):
         st.caption(tr("Generation Remote Task").format(task_id=activity["remote_id"]))
 
 
+def _render_generation_stages(task):
+    """Show measured stage status without fabricating an ETA or quality score."""
+    stages = task.get("generation_stages")
+    if not isinstance(stages, list) or not stages:
+        return
+    labels = {
+        "preparing": "Preparing", "script": "Script", "terms": "Search terms",
+        "audio": "Narration", "subtitle": "Subtitles", "materials": "Visual materials",
+        "rendering": "Video rendering",
+    }
+    icons = {"completed": "🟢", "processing": "🔵", "failed": "🔴", "skipped": "⚪"}
+    with st.expander("Workflow stages", expanded=False):
+        for stage in stages:
+            if not isinstance(stage, dict) or stage.get("name") not in labels:
+                continue
+            status = stage.get("status")
+            start = stage.get("started_at")
+            end = stage.get("ended_at") or time.time()
+            try:
+                duration = max(0, int(float(end) - float(start)))
+            except (TypeError, ValueError, OverflowError):
+                duration = 0
+            st.write(f"{icons.get(status, '🟡')} {labels[stage['name']]} · {status} · {duration}s")
+
+
 def _render_generation_task_snapshot(task_id, task):
     """根据状态存储中的快照渲染进度、失败原因或最终成片。"""
     if not task:
@@ -2447,6 +2501,8 @@ def _render_generation_task_snapshot(task_id, task):
 
     state = _normalize_task_state(task.get("state"))
     progress = max(0, min(100, int(task.get("progress", 0) or 0)))
+    if task.get("generation_stages"):
+        _render_generation_stages(task)
     if state == const.TASK_STATE_PROCESSING:
         _render_generation_activity(task)
         st.progress(
@@ -3602,9 +3658,11 @@ def _sync_device_remembered_keys():
         empty = build_device_vault(replace=True) if signed_out else None
         result = render_device_key_store(empty, session_token="")
         st.session_state.pop("clear_session_cookie", None)
-    elif not signed_in or st.session_state.get("device_key_values_user") != signed_in.get("id"):
-        # A read must happen before *any* writes: companion defaults or a new
-        # session token must not overwrite the previous browser backup.
+    elif (not signed_in
+          or st.session_state.get("device_key_values_user") != signed_in.get("id")
+          or not st.session_state.get("user_keys_applied")):
+        # Both device and account backups must be read before *any* writes:
+        # companion defaults or a new session must not erase saved keys.
         result = render_device_key_store()
     else:
         current_backup = _collect_key_backup(_RUNTIME_CONFIG_SECTIONS)
@@ -3612,8 +3670,11 @@ def _sync_device_remembered_keys():
             _build_key_backup_payload(_RUNTIME_CONFIG_SECTIONS, config.project_version)
             if _count_backup_keys(current_backup) > 0 else None
         )
-        if keys_payload:
-            user_accounts.update_user_keys(signed_in["id"], keys_payload.get("keys") or {})
+        # Persist an empty set too, so an explicitly cleared last key cannot
+        # be resurrected from the account store on a later sign-in.
+        user_accounts.update_user_keys(
+            signed_in["id"], (keys_payload or {}).get("keys") or {}
+        )
         token = st.session_state.get("session_token")
         # Never send password hashes or salts in browser storage.
         account = signed_in
@@ -6955,6 +7016,13 @@ def _render_seedance_video_settings(params):
     )
 
 
+def _clear_jalapeno_video_key():
+    """Explicitly clear the dedicated key; empty widget replays remain ignored."""
+    _delete_runtime_config("app", "jalapeno_video_api_key")
+    st.session_state["jalapeno_video_api_key_input"] = ""
+    _save_runtime_config()
+
+
 def _render_jalapeno_provider_settings():
     """默认值直接填入；独立视频配置不依赖当前选择的大模型 Provider。"""
     snapshot = config.snapshot_config_with_pending(config.app)
@@ -6974,6 +7042,11 @@ def _render_jalapeno_provider_settings():
         ),
     ).strip()
     _set_runtime_config("app", "jalapeno_video_api_key", key)
+    if snapshot.get("jalapeno_video_api_key"):
+        st.button(
+            tr("Clear Jalapeno Video Key"), key="clear_jalapeno_video_key",
+            on_click=_clear_jalapeno_video_key,
+        )
     if (
         not key
         and not os.getenv("JALAPENO_VIDEO_API_KEY", "").strip()
@@ -9918,6 +9991,10 @@ def _render_generation_controls(
                 st.session_state["loomloom_video_quote"] = None
                 st.session_state["loomloom_video_input_signature"] = ""
                 st.session_state["loomloom_video_client_request_id"] = ""
+        except webui_task.TaskQueueFullError:
+            _remove_active_generation_task(task_id)
+            st.error(tr("Generation Queue Full"))
+            st.stop()
         except Exception:
             _remove_active_generation_task(task_id)
             st.error(tr("Video Generation Failed"))
@@ -9962,6 +10039,8 @@ def _render_application():
             st.session_state["user_keys_applied"] = True
     _restore_secret_widgets_from_config()
     _render_top_bar()
+    if st.session_state.pop("profile_saved", False):
+        st.toast("Profile saved")
     restored_count = st.session_state.pop("device_keys_restored_count", None)
     if restored_count:
         st.toast(tr("Device Keys Restored").format(count=restored_count))

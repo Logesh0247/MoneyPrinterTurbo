@@ -202,7 +202,9 @@ def complete_github_login(code, redirect_uri) -> dict:
         if chosen:
             email = str(chosen.get("email") or "").strip()
     if not email:
-        email = str(profile.get("email") or "").strip()
+        # The public profile email is not evidence of verification. Requiring a
+        # verified address avoids creating or linking an identity from it.
+        raise UserAccountError("Auth OAuth Failed")
     return {
         "provider": "github",
         "provider_id": str(profile.get("id") or "").strip(),

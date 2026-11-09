@@ -76,8 +76,16 @@ def test_other_account_cannot_restore_old_device_keys():
     assert not applied
 
 
+def test_account_backup_is_not_overwritten_before_it_is_loaded():
+    state = {"device_key_values_user": "user-1", "session_token": "valid-token"}
+    sync, ctx, _ = make_sync({"id": "user-1"}, sample_vault(), state)
+    sync()
+    ctx["render_device_key_store"].assert_called_once_with()
+    ctx["user_accounts"].update_user_keys.assert_not_called()
+
+
 def test_later_signed_in_sync_writes_public_account_not_password_hash():
-    state = {"device_key_values_user": "user-1", "session_token": "valid-token",
+    state = {"device_key_values_user": "user-1", "user_keys_applied": True, "session_token": "valid-token",
              "device_account": {"id": "user-1", "password_hash": "private-hash"}}
     sync, ctx, _ = make_sync({"id": "user-1", "display_name": "User"}, sample_vault(), state)
     sync()

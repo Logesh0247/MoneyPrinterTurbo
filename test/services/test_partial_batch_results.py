@@ -85,7 +85,7 @@ class TestPartialBatchResults(unittest.TestCase):
                     self.assertEqual(result["failed_video_index"], fail_at)
                     self.assertEqual(result["state"], tm.const.TASK_STATE_FAILED)
                     self.assertEqual(result["failed_stage"], "video")
-                    self.assertEqual(result["error"], f"OSError: simulated {stage} failure")
+                    self.assertEqual(result["error"], "Video batch failed (OSError); check server diagnostics.")
                     self.assertLess(result["progress"], 100)
                     self.assertEqual(result, state.get_task("partial-batch"))
                     self.assertTrue(all(Path(video).is_file() for video in result["videos"]))
@@ -155,7 +155,7 @@ class TestPartialBatchResults(unittest.TestCase):
                 os.path.join(directory, "partial-batch", "final-1.mp4"),
             ])
             self.assertEqual(result["state"], tm.const.TASK_STATE_FAILED)
-            self.assertEqual(result["error"], "OSError: checkpoint unavailable")
+            self.assertEqual(result["error"], "Video batch failed (OSError); check server diagnostics.")
             self.assertEqual(result, state.get_task("partial-batch"))
 
     def test_audio_retry_does_not_return_an_earlier_batchs_videos(self):
@@ -195,7 +195,7 @@ class TestPartialBatchResults(unittest.TestCase):
                 os.path.join(directory, "partial-batch", "final-1.mp4"),
             ])
             self.assertEqual(result["state"], tm.const.TASK_STATE_FAILED)
-            self.assertEqual(result["error"], "OSError: state temporarily unavailable")
+            self.assertEqual(result["error"], "Video batch failed (OSError); check server diagnostics.")
             self.assertEqual(result, state.get_task("partial-batch"))
 
 

@@ -504,13 +504,13 @@ def test_scheduling_failure_is_saved_as_terminal_task_state():
         "add_task",
         side_effect=RuntimeError("worker unavailable"),
     ):
-        with pytest.raises(RuntimeError, match="worker unavailable"):
+        with pytest.raises(RuntimeError, match="WebUI scheduling failed"):
             webui_task.submit_generation(task_id, params, capture_logs=False)
 
     task = webui_task.sm.state.get_task(task_id)
     assert task["state"] == const.TASK_STATE_FAILED
     assert task["failed_stage"] == "scheduling"
-    assert task["error"] == "RuntimeError: worker unavailable"
+    assert task["error"] == "WebUI scheduling failed (RuntimeError); check server diagnostics."
     webui_task.sm.state.delete_task(task_id)
 
 
@@ -835,6 +835,7 @@ def test_terminal_logger_reload_preserves_task_log_handler():
 def test_worker_wrapper_failure_is_saved_instead_of_leaving_processing_state():
     """日志或配置包装层异常也必须转换成可查询的失败终态。"""
     task_id = "worker-wrapper-failure-test"
+    webui_task.sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=42)
     with (
         patch.object(webui_task.tm, "start", side_effect=RuntimeError("lock failed")),
         patch.object(
@@ -853,5 +854,6 @@ def test_worker_wrapper_failure_is_saved_instead_of_leaving_processing_state():
     assert result["failed_stage"] == "webui_worker"
     task = webui_task.sm.state.get_task(task_id)
     assert task["state"] == const.TASK_STATE_FAILED
-    assert task["error"] == "RuntimeError: lock failed"
+    assert task["error"] == "WebUI worker failed (RuntimeError); check server diagnostics."
+    assert task["progress"] == 42
     webui_task.sm.state.delete_task(task_id)

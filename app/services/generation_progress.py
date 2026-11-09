@@ -25,21 +25,40 @@ class _Reporter:
         self.activity = {}
         self.lock = threading.RLock()
         self.last_log_at = 0
+        self.stages = []
 
-    def publish(self, phase, *, reset=False, **fields):
+    def stage(self, name):
+        """Record actual stage transitions, not a guessed percentage or ETA."""
+        with self.lock:
+            now = time.time()
+            if self.stages and self.stages[-1]["status"] == "processing":
+                self.stages[-1].update(status="completed", ended_at=now)
+            self.stages.append({"name": name, "status": "processing", "started_at": now})
+            self.publish(name, reset=True)
+
+    def finish(self, status):
+        with self.lock:
+            if self.stages and self.stages[-1]["status"] == "processing":
+                self.stages[-1].update(status=status, ended_at=time.time())
+                self.publish(self.activity.get("phase", ""), force=True)
+
+    def publish(self, phase, *, reset=False, force=False, **fields):
         # 状态展示属于辅助能力。Redis 短暂不可用不能中断已付费任务，也不能
         # 因异常重试而触发新的生成。这里只写白名单字段，不接收响应或下载 URL。
         try:
             with self.lock:
                 now = time.time()
                 previous = self.activity.get("phase")
-                if (phase == previous == "downloading"
+                if (not force and phase == previous == "downloading"
                         and now - self.activity.get("updated_at", 0) < 1):
                     return
                 self.activity = {} if reset else dict(self.activity)
                 self.activity.setdefault("started_at", now)
                 self.activity.update(phase=phase, updated_at=now, **fields)
-                sm.state.patch_task(self.task_id, generation_activity=self.activity)
+                sm.state.patch_task(
+                    self.task_id, generation_activity=self.activity,
+                    generation_stages=[dict(stage) for stage in self.stages],
+                )
                 if previous != phase or now - self.last_log_at >= 30:
                     self.last_log_at = now
                     logger.info(
@@ -64,7 +83,15 @@ def task_scope(task_id):
 def stage(phase):
     reporter = _current.get()
     if reporter:
-        reporter.publish(phase, reset=True)
+        reporter.stage(phase)
+
+
+def finish(status):
+    if status not in {"completed", "failed", "skipped"}:
+        return
+    reporter = _current.get()
+    if reporter:
+        reporter.finish(status)
 
 
 def submitting(provider):
