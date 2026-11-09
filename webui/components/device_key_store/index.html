@@ -62,12 +62,40 @@
         }
       }
 
+      function mergeStore(existing, incoming) {
+        if (!incoming || typeof incoming !== "object" || Array.isArray(incoming)) {
+          return existing;
+        }
+        if (incoming.replace) {
+          const stored = Object.assign({}, incoming);
+          delete stored.replace;
+          return stored;
+        }
+        const base =
+          existing && typeof existing === "object" && !Array.isArray(existing)
+            ? existing
+            : {};
+        const merged = Object.assign({}, base, incoming);
+        delete merged.replace;
+        if (!incoming.keys_backup && base.keys_backup) {
+          merged.keys_backup = base.keys_backup;
+        }
+        if (!incoming.account && base.account) {
+          merged.account = base.account;
+        }
+        if (!incoming.session_token && base.session_token) {
+          merged.session_token = base.session_token;
+        }
+        return merged;
+      }
+
       function writeStore(payload) {
         if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
           return;
         }
         try {
-          window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+          const merged = mergeStore(readStore(), payload);
+          window.localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
         } catch (error) {
           // Private mode and quota errors must not wipe a previous copy.
         }

@@ -3644,11 +3644,12 @@ def _apply_saved_user_keys(user_id):
 
 
 def _sync_device_remembered_keys():
-    """Read the browser vault before writing; never send server keys pre-login.
+    """Read the browser vault before widgets run; never send server keys pre-login.
 
-    This legacy browser backup contains plaintext credentials and is suitable
-    only for a trusted, protected single-user deployment. Render environment
-    variables are preferred for persistent host-managed keys.
+    Writes happen in ``_persist_remembered_keys`` after Settings widgets copy
+    values into the runtime config. The settings dialog is a Streamlit fragment,
+    so a start-of-run write used to persist an empty snapshot and wipe keys the
+    user had just pasted.
     """
     signed_in = webui_auth.current_user()
     signed_out = bool(st.session_state.get("signed_out"))
@@ -3658,31 +3659,10 @@ def _sync_device_remembered_keys():
         empty = build_device_vault(replace=True) if signed_out else None
         result = render_device_key_store(empty, session_token="")
         st.session_state.pop("clear_session_cookie", None)
-    elif (not signed_in
-          or st.session_state.get("device_key_values_user") != signed_in.get("id")
-          or not st.session_state.get("user_keys_applied")):
+    else:
         # Both device and account backups must be read before *any* writes:
         # companion defaults or a new session must not erase saved keys.
         result = render_device_key_store()
-    else:
-        current_backup = _collect_key_backup(_RUNTIME_CONFIG_SECTIONS)
-        keys_payload = (
-            _build_key_backup_payload(_RUNTIME_CONFIG_SECTIONS, config.project_version)
-            if _count_backup_keys(current_backup) > 0 else None
-        )
-        # Persist an empty set too, so an explicitly cleared last key cannot
-        # be resurrected from the account store on a later sign-in.
-        user_accounts.update_user_keys(
-            signed_in["id"], (keys_payload or {}).get("keys") or {}
-        )
-        token = st.session_state.get("session_token")
-        # Never send password hashes or salts in browser storage.
-        account = signed_in
-        vault_to_save = build_device_vault(
-            account=account, session_token=token, keys_backup=keys_payload
-        )
-        result = (render_device_key_store(vault_to_save, session_token=token)
-                  if token else render_device_key_store(vault_to_save))
 
     if not isinstance(result, dict) or not result.get("ready"):
         return {"ready": False, "vault": None}
@@ -3714,6 +3694,47 @@ def _sync_device_remembered_keys():
     # Persist the signed-in account/session only after the first read completes.
     st.rerun()
     return {"ready": True, "vault": vault}
+
+
+def _persist_remembered_keys(component_key):
+    """Save the current Settings keys to this account and this browser.
+
+    Must run after credential widgets have written to the runtime config.
+    Cloud hosts lose ``config.toml`` on sleep, and the settings dialog only
+    reruns itself, so this is what makes pasted keys survive the next visit.
+    An empty snapshot is not written: that used to erase a good device copy.
+    """
+    if st.session_state.get("signed_out"):
+        return
+    signed_in = webui_auth.current_user()
+    if webui_auth.auth_gate_enabled() and not signed_in:
+        return
+
+    current_backup = _collect_key_backup(_RUNTIME_CONFIG_SECTIONS)
+    keys_payload = (
+        _build_key_backup_payload(_RUNTIME_CONFIG_SECTIONS, config.project_version)
+        if _count_backup_keys(current_backup) > 0
+        else None
+    )
+    if signed_in and keys_payload:
+        user_accounts.update_user_keys(
+            signed_in["id"], keys_payload.get("keys") or {}
+        )
+
+    token = st.session_state.get("session_token")
+    if keys_payload:
+        vault_to_save = build_device_vault(
+            account=signed_in, session_token=token, keys_backup=keys_payload
+        )
+        if token:
+            render_device_key_store(
+                vault_to_save, session_token=token, component_key=component_key
+            )
+        else:
+            render_device_key_store(vault_to_save, component_key=component_key)
+        return
+    if token:
+        render_device_key_store(session_token=token, component_key=component_key)
 
 
 def _apply_pending_settings_preset():
@@ -5458,6 +5479,9 @@ def _render_settings_dialog():
                 st.session_state["settings_material_providers"] = remembered
 
     _save_runtime_config()
+    # Dialog fragment reruns do not reach the main-page vault sync. Write the
+    # keys that were just entered so the next visit can restore them.
+    _persist_remembered_keys("mpt_device_key_store_settings")
 
 
 # -----------------------------------------------------------------------------
@@ -10096,6 +10120,7 @@ def _render_application():
     # 如果后台任务正在使用配置，配置层会在任务结束时自动应用并落盘最新值。
     if not generation_submitted:
         _save_runtime_config()
+    _persist_remembered_keys("mpt_device_key_store_persist")
 
 
 _render_application()
