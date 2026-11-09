@@ -8,6 +8,7 @@ user signed in so opening the app on a phone does not ask again.
 from __future__ import annotations
 
 import os
+from urllib.parse import urlsplit
 
 import streamlit as st
 from loguru import logger
@@ -28,28 +29,20 @@ def public_base_url() -> str:
         os.environ.get("MPT_PUBLIC_URL", "").strip()
         or os.environ.get("OAUTH_REDIRECT_URI", "").strip()
     )
-    if explicit:
-        return explicit.rstrip("/")
+    # Never derive OAuth redirects from untrusted Host/Forwarded headers.
     try:
-        headers = getattr(st.context, "headers", None) or {}
-    except Exception:
-        headers = {}
-    host = str(
-        headers.get("X-Forwarded-Host")
-        or headers.get("Host")
-        or headers.get("host")
-        or ""
-    ).split(",", 1)[0].strip()
-    if not host:
+        parsed = urlsplit(explicit)
+        if (not parsed.hostname or parsed.username or parsed.password
+                or parsed.query or parsed.fragment or parsed.path not in {"", "/"}):
+            return ""
+        if parsed.scheme != "https" and not (
+            parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+        ):
+            return ""
+    except ValueError:
         return ""
-    proto = str(
-        headers.get("X-Forwarded-Proto")
-        or headers.get("x-forwarded-proto")
-        or ("https" if "onrender.com" in host else "http")
-    ).split(",", 1)[0].strip()
-    if proto not in {"http", "https"}:
-        proto = "https"
-    return f"{proto}://{host}"
+    return explicit.rstrip("/")
+
 
 
 def oauth_redirect_uri() -> str:
@@ -67,7 +60,16 @@ def read_session_cookie() -> str:
 
 def current_user():
     user = st.session_state.get("current_user")
-    return user if isinstance(user, dict) and user.get("id") else None
+    token = st.session_state.get("session_token")
+    if not isinstance(user, dict) or not user.get("id") or not token:
+        return None
+    # A live Streamlit session must not outlive server revocation or expiration.
+    verified = user_accounts.user_from_session(token)
+    if not verified or verified.get("id") != user.get("id"):
+        st.session_state.pop("current_user", None)
+        st.session_state.pop("session_token", None)
+        return None
+    return verified
 
 
 def remember_session(public_user, token, device_account=None):
@@ -80,18 +82,31 @@ def remember_session(public_user, token, device_account=None):
 
 
 def sign_out():
+    token = str(st.session_state.get("session_token") or "").strip()
+    if token:
+        try:
+            user_accounts.revoke_session(token)
+        except Exception as exc:
+            # Do not report a successful logout if the session is still valid.
+            logger.error("session revocation failed: {}", type(exc).__name__)
+            st.session_state["auth_logout_error"] = True
+            return False
     st.session_state.pop("current_user", None)
     st.session_state.pop("device_account", None)
+    st.session_state.pop("device_key_values_user", None)
+    st.session_state.pop("user_keys_applied", None)
     st.session_state["session_token"] = ""
     st.session_state["signed_out"] = True
     st.session_state["clear_session_cookie"] = True
+    st.session_state.pop("auth_logout_error", None)
+    return True
 
 
 def _set_auth_error(exc):
     if isinstance(exc, UserAccountError):
         st.session_state["auth_error"] = exc.code
     else:
-        logger.warning(f"sign-in failed: {exc}")
+        logger.warning("sign-in failed: {}", type(exc).__name__)
         st.session_state["auth_error"] = "Auth OAuth Failed"
 
 
@@ -125,13 +140,20 @@ def consume_oauth_callback():
     if error:
         st.session_state["auth_error"] = "Auth OAuth Failed"
         return False
-    pending = user_accounts.pop_oauth_pending(state) or {}
-    provider = str(pending.get("provider") or "")
+    # The state must belong to this browser's initiating Streamlit session,
+    # not merely exist in the shared server store (login-CSRF protection).
+    provider = next((name for name in ("google", "github")
+                     if state and state == st.session_state.get(f"oauth_{name}_state")), "")
     if not provider:
-        if state and state == str(st.session_state.get("oauth_google_state") or ""):
-            provider = "google"
-        elif state and state == str(st.session_state.get("oauth_github_state") or ""):
-            provider = "github"
+        st.session_state["auth_error"] = "Auth OAuth Failed"
+        return False
+    pending = user_accounts.pop_oauth_pending(state) or {}
+    st.session_state.pop(f"{provider}_auth_url", None)
+    if pending.get("provider") != provider:
+        st.session_state.pop(f"oauth_{provider}_state", None)
+        st.session_state.pop(f"oauth_{provider}_verifier", None)
+        st.session_state["auth_error"] = "Auth OAuth Failed"
+        return False
     redirect_uri = (
         str(pending.get("redirect_uri") or "")
         or str(st.session_state.get("oauth_redirect_uri") or "")
@@ -185,13 +207,9 @@ def restore_session_from_device(vault):
             device_account = user_accounts.get_device_account(public["id"])
             remember_session(public, token, device_account)
             return True
-    account = (vault or {}).get("account")
-    if isinstance(account, dict):
-        restored = user_accounts.restore_device_account(account)
-        if restored:
-            public, token, device_account = restored
-            remember_session(public, token, device_account)
-            return True
+    # Browser storage is attacker-controlled. An account object is not proof
+    # of identity, even if it contains a password hash or names an existing
+    # user. Only a server-verified session may restore a signed-in session.
     return False
 
 

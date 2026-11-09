@@ -432,6 +432,38 @@ def _fallback_write_videofile(clip, output_file: str, failed_codec: str, reason:
     return _DEFAULT_VIDEO_CODEC
 
 
+class FinalVideoValidationError(RuntimeError):
+    """A final render could not be confirmed as fully decodable."""
+
+
+def _verify_final_render(file_path: str, duration: float | None) -> None:
+    """Decode both final streams before publication; this is not a quality pass."""
+    if not os.path.isfile(file_path) or os.path.getsize(file_path) <= 0:
+        raise FinalVideoValidationError("Final video is missing or empty")
+    try:
+        seconds = float(duration or 0)
+        if not math.isfinite(seconds) or seconds < 0:
+            seconds = 0
+    except (TypeError, ValueError, OverflowError):
+        seconds = 0
+    timeout = max(120, min(3600, int(seconds * 4 + 60)))
+    try:
+        with _stage_heartbeat("final video integrity check"):
+            result = subprocess.run(
+                [utils.get_ffmpeg_binary(), "-nostdin", "-v", "error", "-xerror",
+                 "-protocol_whitelist", "file,pipe", "-i", file_path,
+                 "-map", "0:V:0", "-map", "0:a:0", "-f", "null", "-"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=timeout, check=False,
+            )
+    except subprocess.TimeoutExpired as exc:
+        raise FinalVideoValidationError("Final video verification timed out") from exc
+    except OSError as exc:
+        raise FinalVideoValidationError("Final video verifier could not start") from exc
+    if result.returncode != 0:
+        raise FinalVideoValidationError("Final video or audio stream could not be decoded")
+
+
 def _write_videofile_with_codec_fallback(
     clip, output_file: str, codec: str, atomic_output: bool = False, **kwargs
 ):
@@ -457,6 +489,7 @@ def _write_videofile_with_codec_fallback(
             used_codec = _write_videofile_with_codec_fallback(
                 clip, temp_output, codec, **kwargs
             )
+            _verify_final_render(temp_output, getattr(clip, "duration", None))
             os.replace(temp_output, output_file)
             return used_codec
         finally:

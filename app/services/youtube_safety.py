@@ -25,11 +25,17 @@ BLOCK_REASON = (
 )
 
 
+# The legacy Upload-Post adapter can send these explicitly named non-YouTube
+# targets. Empty, malformed or unknown platform IDs must not reach the provider:
+# the provider might otherwise interpret an omitted target as its defaults.
+_NON_YOUTUBE_TARGETS = frozenset({"tiktok", "instagram", "facebook", "linkedin"})
+
+
 def is_youtube_target(platforms):
-    """Recognize provider platform aliases without silently accepting bad types."""
-    if not isinstance(platforms, (list, tuple)):
-        return True  # Invalid/unknown target: fail closed.
-    return any(not isinstance(p, str) or p.strip().lower().startswith("youtube") for p in platforms)
+    """Block YouTube and any ambiguous target at the legacy network boundary."""
+    if not isinstance(platforms, (list, tuple)) or not platforms:
+        return True
+    return any(not isinstance(p, str) or p not in _NON_YOUTUBE_TARGETS for p in platforms)
 
 
 def official_youtube_publishing_available():

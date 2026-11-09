@@ -847,12 +847,14 @@ class TestVideoService(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             final_path = Path(temp_dir, "final-1.mp4")
             final_path.write_bytes(b"previous complete mp4")
-            vd._write_videofile_with_codec_fallback(
-                SuccessfulClip(),
-                str(final_path),
-                codec="libx264",
-                atomic_output=True,
-            )
+            with patch.object(vd, "_verify_final_render") as verify:
+                vd._write_videofile_with_codec_fallback(
+                    SuccessfulClip(),
+                    str(final_path),
+                    codec="libx264",
+                    atomic_output=True,
+                )
+            verify.assert_called_once()
 
             self.assertEqual(final_path.read_bytes(), b"new complete mp4")
             self.assertEqual(list(Path(temp_dir).iterdir()), [final_path])

@@ -1139,8 +1139,8 @@ def generate_final_videos(
                 # 视频、旁白和字幕都已生成时，第三方配乐临时失败不应浪费整条
                 # 任务。当前视频明确禁用 BGM，并把降级结果返回 WebUI 提醒用户。
                 logger.warning(
-                    f"{display_name} BGM generation failed: task_id={task_id}, "
-                    f"video_index={index}, error={exc}"
+                    "{} BGM generation failed: task_id={}, video_index={}, type={}",
+                    display_name, task_id, index, type(exc).__name__,
                 )
                 bgm_file_override = ""
                 warnings.append({"code": warning_code, "video_index": index})
@@ -1770,6 +1770,8 @@ def _run_pipeline(
                 "terms",
                 "failed to generate video search terms",
             )
+    else:
+        generation_progress.finish("skipped")
 
     save_script_data(task_id, video_script, video_terms, params)
 
@@ -1857,6 +1859,8 @@ def _run_pipeline(
         )
         return {"subtitle_path": subtitle_path}
 
+    if not params.subtitle_enabled:
+        generation_progress.finish("skipped")
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=40)
 
     generation_progress.stage("materials")
@@ -1909,15 +1913,22 @@ def _run_pipeline(
             partial_results=partial_results,
         )
     except Exception as exc:
-        logger.exception(f"video batch failed, task_id: {task_id}, error: {exc}")
+        # Third-party exceptions may contain credentials, URLs or response bodies.
+        # Keep the class and stage for diagnosis, but do not persist raw messages.
+        logger.error("video batch failed, task_id: {}, error type: {}", task_id, type(exc).__name__)
         # Warnings for the failing clip do not describe any usable output.
         completed_count = len(partial_results.get("videos", []))
         partial_results["warnings"] = [
             warning for warning in partial_results.get("warnings", [])
             if warning.get("video_index", 0) <= completed_count
         ] or None
+        failure_message = (
+            "Final video integrity check failed; the output could not be verified."
+            if isinstance(exc, video.FinalVideoValidationError)
+            else f"Video batch failed ({type(exc).__name__}); check server diagnostics."
+        )
         return _mark_task_failed(
-            task_id, "video", f"{type(exc).__name__}: {exc}", details=partial_results,
+            task_id, "video", failure_message, details=partial_results,
         )
 
     if not final_video_paths:
@@ -2012,7 +2023,7 @@ def start(
     """
     with generation_progress.task_scope(task_id):
         try:
-            return _run_pipeline(
+            result = _run_pipeline(
                 task_id,
                 params,
                 stop_at=stop_at,
@@ -2028,14 +2039,29 @@ def start(
                    if jalapeno_video_endpoint is not None else {}),
             )
         except Exception as exc:
-            logger.exception(
-                f"unexpected task pipeline failure, task_id: {task_id}, error: {exc}"
-            )
-            return _mark_task_failed(
+            # Untrusted SDK exceptions can include API keys, signed URLs or
+            # request bodies. Never copy their raw text into logs or task state.
+            logger.error("unexpected task pipeline failure, task_id: {}, error type: {}",
+                         task_id, type(exc).__name__)
+            result = _mark_task_failed(
                 task_id,
                 "pipeline",
-                f"{type(exc).__name__}: {exc}",
+                f"Unexpected pipeline failure ({type(exc).__name__}); check server diagnostics.",
             )
+        try:
+            final_state = (sm.state.get_task(task_id) or {}).get("state")
+            if final_state == const.TASK_STATE_COMPLETE:
+                generation_progress.finish("completed")
+            elif final_state == const.TASK_STATE_FAILED:
+                generation_progress.finish("failed")
+                # Failure callers expect the same structured state as the API.
+                refreshed = sm.state.get_task(task_id)
+                if isinstance(result, dict) and result.get("state") == const.TASK_STATE_FAILED and refreshed:
+                    result = refreshed
+        except Exception as exc:
+            # Progress reporting is advisory and must not change task outcome.
+            logger.debug("could not finish stage reporting: {}", type(exc).__name__)
+        return result
 
 
 if __name__ == "__main__":

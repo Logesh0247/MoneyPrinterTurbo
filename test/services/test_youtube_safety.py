@@ -20,11 +20,31 @@ def test_youtube_upload_is_blocked_before_any_network_call(tmp_path, monkeypatch
     post.assert_not_called()
 
 
+@pytest.mark.parametrize("platforms", [[], [""], ["unknown"], ["youtube_music"]])
+def test_ambiguous_upload_targets_never_reach_network(tmp_path, monkeypatch, platforms):
+    from app.services import upload_post
+    monkeypatch.setattr(upload_post.config, "app", {
+        "upload_post_enabled": True, "upload_post_api_key": "test-key",
+        "upload_post_username": "test-user",
+    })
+    post = MagicMock()
+    monkeypatch.setattr(upload_post.requests, "post", post)
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"test")
+    assert not UploadPostService().upload_video(str(video), "title", platforms)["success"]
+    post.assert_not_called()
+
+
 def test_unknown_targets_fail_closed():
     assert youtube_safety.is_youtube_target(None)
     assert youtube_safety.is_youtube_target([None])
+    assert youtube_safety.is_youtube_target([])
+    assert youtube_safety.is_youtube_target([""])
+    assert youtube_safety.is_youtube_target(["unknown"])
+    assert youtube_safety.is_youtube_target([" YouTube "])
     assert youtube_safety.is_youtube_target(["youtube", "tiktok"])
     assert not youtube_safety.is_youtube_target(["tiktok", "instagram"])
+    assert not youtube_safety.is_youtube_target(["facebook", "linkedin"])
 
 
 def test_reviewed_publish_stops_before_creating_a_marker(tmp_path, monkeypatch):

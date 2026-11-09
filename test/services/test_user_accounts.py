@@ -1,6 +1,6 @@
-import os
+import json
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from unittest.mock import patch
 
 import jwt
 import pytest
@@ -16,6 +16,21 @@ def accounts_dir(tmp_path, monkeypatch):
     return tmp_path
 
 
+@pytest.mark.parametrize("payload", [
+    {"secret": "stable", "users": None},
+    {"secret": "stable", "users": ["invalid-user"]},
+    {"secret": "", "users": []},
+    {"users": []},
+])
+def test_corrupt_account_store_fails_without_overwriting(accounts_dir, payload):
+    path = accounts_dir / "accounts.json"
+    original = json.dumps(payload)
+    path.write_text(original, encoding="utf-8")
+    with pytest.raises(UserAccountError, match="Auth Storage Error"):
+        user_accounts.create_email_user("new@example.com", "password1234")
+    assert path.read_text(encoding="utf-8") == original
+
+
 def test_email_signup_and_login_round_trip(accounts_dir):
     public, token, device = user_accounts.create_email_user(
         "Logesh@Gmail.com", "correct-horse", "Logesh"
@@ -23,7 +38,8 @@ def test_email_signup_and_login_round_trip(accounts_dir):
     assert public["email"] == "logesh@gmail.com"
     assert public["display_name"] == "Logesh"
     assert "password_hash" not in public
-    assert device["password_hash"]
+    assert "password_hash" not in device
+    assert "password_salt" not in device
     restored = user_accounts.user_from_session(token)
     assert restored["id"] == public["id"]
 
@@ -32,17 +48,34 @@ def test_email_signup_and_login_round_trip(accounts_dir):
     assert token2
 
 
+def test_legacy_password_is_upgraded_only_after_valid_login(accounts_dir):
+    user, _, _ = user_accounts.create_email_user("user@example.com", "password1234")
+    salt = "ab" * 16
+    def legacy(store):
+        record = user_accounts._find_user(store, user_id=user["id"])
+        record["password_salt"] = salt
+        record["password_hash"] = user_accounts._hash_password("old-pass", salt)
+    user_accounts._with_store(legacy)
+    with pytest.raises(UserAccountError):
+        user_accounts.authenticate_email("user@example.com", "wrong")
+    assert user_accounts._read_store()["users"][0]["password_salt"] == salt
+    user_accounts.authenticate_email("user@example.com", "old-pass")
+    updated = user_accounts._read_store()["users"][0]
+    assert updated["password_hash"].startswith("$argon2id$")
+    assert not updated["password_salt"]
+
+
 def test_duplicate_email_is_rejected(accounts_dir):
-    user_accounts.create_email_user("user@example.com", "password12")
+    user_accounts.create_email_user("user@example.com", "password1234")
     with pytest.raises(UserAccountError) as exc:
-        user_accounts.create_email_user("user@example.com", "password12")
+        user_accounts.create_email_user("user@example.com", "password1234")
     assert exc.value.code == "Auth Email Taken"
 
 
 def test_wrong_password_does_not_reveal_whether_email_exists(accounts_dir):
-    user_accounts.create_email_user("user@example.com", "password12")
+    user_accounts.create_email_user("user@example.com", "password1234")
     with pytest.raises(UserAccountError) as missing:
-        user_accounts.authenticate_email("missing@example.com", "password12")
+        user_accounts.authenticate_email("missing@example.com", "password1234")
     with pytest.raises(UserAccountError) as wrong:
         user_accounts.authenticate_email("user@example.com", "wrong-password")
     assert missing.value.code == wrong.value.code == "Auth Login Failed"
@@ -53,11 +86,11 @@ def test_short_password_and_invalid_email_are_rejected(accounts_dir):
         user_accounts.create_email_user("user@example.com", "short")
     assert short.value.code == "Auth Password Too Short"
     with pytest.raises(UserAccountError) as invalid:
-        user_accounts.create_email_user("not-an-email", "password12")
+        user_accounts.create_email_user("not-an-email", "password1234")
     assert invalid.value.code == "Auth Invalid Email"
 
 
-def test_oauth_google_creates_user_and_links_by_email(accounts_dir):
+def test_oauth_identity_cannot_link_by_email_without_consent(accounts_dir):
     public, token, _ = user_accounts.upsert_oauth_user(
         "google",
         "google-123",
@@ -69,19 +102,16 @@ def test_oauth_google_creates_user_and_links_by_email(accounts_dir):
     assert "google" in public["auth_providers"]
     assert user_accounts.user_from_session(token)["email"] == "person@gmail.com"
 
-    linked, _, _ = user_accounts.upsert_oauth_user(
-        "github",
-        "42",
-        "person@gmail.com",
-        github_login="person",
-    )
-    assert linked["id"] == public["id"]
-    assert linked["github_id"] == "42"
-    assert linked["google_id"] == "google-123"
+    with pytest.raises(UserAccountError, match="Auth OAuth Failed"):
+        user_accounts.upsert_oauth_user(
+            "github", "42", "person@gmail.com", github_login="person"
+        )
+    again, _, _ = user_accounts.upsert_oauth_user("google", "google-123", "person@gmail.com")
+    assert again["id"] == public["id"]
 
 
 def test_expired_session_is_rejected(accounts_dir):
-    public, _, _ = user_accounts.create_email_user("user@example.com", "password12")
+    public, _, _ = user_accounts.create_email_user("user@example.com", "password1234")
     store = user_accounts._load_store_unlocked()
     expired = jwt.encode(
         {
@@ -94,28 +124,46 @@ def test_expired_session_is_rejected(accounts_dir):
     assert user_accounts.user_from_session(expired) is None
 
 
-def test_device_restore_recreates_account_after_server_wipe(accounts_dir):
-    public, _, device = user_accounts.create_email_user(
-        "phone@gmail.com", "password12", "Phone"
-    )
-    user_accounts.update_user_keys(public["id"], {"app": {"openai_api_key": "sk-phone"}})
-    device["keys"] = {"app": {"openai_api_key": "sk-phone"}}
+def test_device_account_cannot_recreate_or_authenticate_a_user(accounts_dir):
+    forged = {"id": "victim", "email": "victim@example.com", "password_hash": "fake"}
+    assert user_accounts.restore_device_account(forged) is None
+    assert not (accounts_dir / "accounts.json").exists()
 
-    Path(os.environ["MPT_ACCOUNTS_DIR"], "accounts.json").unlink()
 
-    restored = user_accounts.restore_device_account(device)
-    assert restored is not None
-    restored_public, token, _ = restored
-    assert restored_public["email"] == "phone@gmail.com"
-    assert user_accounts.user_from_session(token)["id"] == public["id"]
-    assert user_accounts.get_user_keys(public["id"])["app"]["openai_api_key"] == "sk-phone"
-    _, login_token, _ = user_accounts.authenticate_email("phone@gmail.com", "password12")
-    assert login_token
+def test_logout_revokes_only_one_of_two_sessions(accounts_dir):
+    user, token1, _ = user_accounts.create_email_user("user@example.com", "password1234")
+    _, token2, _ = user_accounts.authenticate_email("user@example.com", "password1234")
+    assert token1 != token2
+    store = user_accounts._load_store_unlocked()
+    assert token1 not in json.dumps(store)
+    assert user_accounts.revoke_session(token1)
+    assert user_accounts.user_from_session(token1) is None
+    assert user_accounts.user_from_session(token2)["id"] == user["id"]
+    assert not user_accounts.revoke_session(token1)
+
+
+def test_legacy_stateless_token_is_not_accepted(accounts_dir):
+    public, _, _ = user_accounts.create_email_user("user@example.com", "password1234")
+    store = user_accounts._load_store_unlocked()
+    legacy = jwt.encode({"uid": public["id"], "exp": datetime.now(timezone.utc) + timedelta(days=1)},
+                        store["secret"], algorithm="HS256")
+    assert user_accounts.user_from_session(legacy) is None
+
+
+def test_unchanged_key_backup_does_not_rewrite_accounts(accounts_dir):
+    user, _, _ = user_accounts.create_email_user("user@example.com", "password1234")
+    keys = {"app": {"openai_api_key": "synthetic"}}
+    user_accounts.update_user_keys(user["id"], keys)
+    with patch.object(user_accounts, "_save_store_unlocked") as save:
+        user_accounts.update_user_keys(user["id"], keys)
+        user_accounts.update_user_keys("missing-user", keys)
+    save.assert_not_called()
+    assert user_accounts.get_user_keys(user["id"]) == keys
 
 
 def test_per_user_keys_are_isolated(accounts_dir):
-    first, _, _ = user_accounts.create_email_user("a@example.com", "password12")
-    second, _, _ = user_accounts.create_email_user("b@example.com", "password12")
+    first, _, _ = user_accounts.create_email_user("a@example.com", "password1234")
+    second, _, _ = user_accounts.create_email_user("b@example.com", "password1234")
     user_accounts.update_user_keys(first["id"], {"app": {"openai_api_key": "sk-a"}})
     user_accounts.update_user_keys(second["id"], {"app": {"openai_api_key": "sk-b"}})
     assert user_accounts.get_user_keys(first["id"])["app"]["openai_api_key"] == "sk-a"

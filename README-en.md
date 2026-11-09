@@ -816,3 +816,21 @@ WebUI and are not a replacement for a dedicated production secrets manager.
 Render free-tier files remain ephemeral; environment settings persist across
 redeploys until changed in the Render dashboard. Neither provider access nor
 billing has been verified by this project.
+
+#### Remembered credentials and account limitations
+
+The legacy browser backup reads the existing device vault before it writes new
+state, and only restores keys after sign-in when the vault account matches the
+signed-in account. It is not a secrets manager: legacy backups contain plaintext
+API keys in browser storage, and the app's server-side configuration is shared
+between sessions. Do not use this feature in a public or multi-user deployment.
+Use host-managed environment variables instead and protect the entire service
+with the reverse proxy. Anyone who can access a shared deployment may be able to
+use its provider credentials. Rotate any keys previously exposed in chat or an
+unprotected deployment.
+
+Browser-stored account data is not proof of identity; only a server-verified
+session can sign a user in. The free Render filesystem is ephemeral, so a server
+reset can invalidate sessions and erase accounts. Persistent, access-controlled
+account storage and a dedicated secrets manager are required for reliable,
+secure operation across redeploys. The app does not currently provide them.

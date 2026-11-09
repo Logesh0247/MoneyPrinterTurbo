@@ -18,6 +18,8 @@ import secrets
 import tempfile
 import threading
 
+from argon2 import PasswordHasher
+from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 from filelock import FileLock
 import jwt
 from loguru import logger
@@ -27,13 +29,16 @@ from app.utils import utils
 
 SESSION_COOKIE_NAME = "mpt_session"
 SESSION_DAYS = 90
-PASSWORD_MIN_LENGTH = 8
+PASSWORD_MIN_LENGTH = 12
 PASSWORD_MAX_LENGTH = 256
 EMAIL_MAX_LENGTH = 254
 NAME_MAX_LENGTH = 80
 PBKDF2_ITERATIONS = 210_000
 _EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _lock = threading.RLock()
+_password_hasher = PasswordHasher()  # Argon2id with argon2-cffi's recommended defaults.
+# Used only to equalize the expensive path for unknown/passwordless accounts.
+_dummy_password_hash = _password_hasher.hash(secrets.token_urlsafe(32))
 
 
 class UserAccountError(ValueError):
@@ -106,11 +111,16 @@ def _hash_password(password: str, salt_hex: str) -> str:
 
 
 def _new_password_record(password: str) -> tuple[str, str]:
-    salt = secrets.token_bytes(16).hex()
-    return salt, _hash_password(password, salt)
+    # Argon2's encoded hash includes its random salt and parameters.
+    return "", _password_hasher.hash(password)
 
 
 def _password_matches(password: str, salt_hex: str, expected_hex: str) -> bool:
+    if expected_hex.startswith("$argon2id$"):
+        try:
+            return _password_hasher.verify(expected_hex, password)
+        except (VerifyMismatchError, VerificationError, InvalidHashError):
+            return False
     if not salt_hex or not expected_hex:
         return False
     try:
@@ -136,9 +146,14 @@ def _load_store_unlocked() -> dict:
     if not isinstance(payload, dict):
         raise UserAccountError("Auth Storage Error")
     users = payload.get("users")
-    if not isinstance(users, list):
-        users = []
-    secret = str(payload.get("secret") or "").strip() or secrets.token_urlsafe(48)
+    secret = payload.get("secret")
+    # An existing malformed store is not an empty installation. Silently
+    # replacing its users or signing secret on the next write loses accounts
+    # and invalidates sessions. Stop before modifying the original file.
+    if (not isinstance(users, list) or any(not isinstance(user, dict) for user in users)
+            or not isinstance(secret, str) or not secret.strip()):
+        logger.error("account store is invalid; refusing to overwrite it")
+        raise UserAccountError("Auth Storage Error")
     store = {"secret": secret, "users": users}
     pending = payload.get("oauth_pending")
     if isinstance(pending, dict):
@@ -224,11 +239,8 @@ def public_user(record) -> dict:
 
 
 def device_account_payload(record) -> dict:
-    """Fields this device needs to restore the account after a server restart."""
-    public = public_user(record)
-    public["password_hash"] = str(record.get("password_hash") or "")
-    public["password_salt"] = str(record.get("password_salt") or "")
-    return public
+    """Only public profile fields may leave the account store."""
+    return public_user(record)
 
 
 def _new_user_id() -> str:
@@ -240,12 +252,26 @@ def _touch(user: dict) -> None:
 
 
 def _issue_token(store: dict, user_id: str) -> str:
-    expires = _utc_now() + timedelta(days=SESSION_DAYS)
-    return jwt.encode(
-        {"uid": user_id, "exp": expires},
-        store["secret"],
-        algorithm="HS256",
+    """Issue a unique, revocable session; only its digest is stored server-side."""
+    record = _find_user(store, user_id=user_id)
+    if record is None:
+        raise UserAccountError("Auth Login Failed")
+    now = _utc_now()
+    expires = now + timedelta(days=SESSION_DAYS)
+    token = jwt.encode(
+        {"uid": user_id, "exp": expires, "iat": now, "jti": secrets.token_urlsafe(32)},
+        store["secret"], algorithm="HS256",
     )
+    sessions = record.setdefault("sessions", {})
+    if not isinstance(sessions, dict):
+        raise UserAccountError("Auth Storage Error")
+    # Prune expired entries during issuance to avoid unbounded accumulation.
+    now_timestamp = int(now.timestamp())
+    for digest, expiry in list(sessions.items()):
+        if not isinstance(expiry, int) or expiry <= now_timestamp:
+            sessions.pop(digest, None)
+    sessions[hashlib.sha256(token.encode("utf-8")).hexdigest()] = int(expires.timestamp())
+    return token
 
 
 def create_email_user(email, password, display_name="") -> tuple[dict, str]:
@@ -286,12 +312,18 @@ def authenticate_email(email, password) -> tuple[dict, str]:
 
     def mutate(store):
         record = _find_user(store, email=email)
-        if record is None or not _password_matches(
+        if record is None or not record.get("password_hash"):
+            _password_matches(password, "", _dummy_password_hash)
+            raise UserAccountError("Auth Login Failed")
+        if not _password_matches(
             password,
             str(record.get("password_salt") or ""),
             str(record.get("password_hash") or ""),
         ):
             raise UserAccountError("Auth Login Failed")
+        encoded = str(record.get("password_hash") or "")
+        if not encoded.startswith("$argon2id$") or _password_hasher.check_needs_rehash(encoded):
+            record["password_salt"], record["password_hash"] = _new_password_record(password)
         _touch(record)
         token = _issue_token(store, record["id"])
         return public_user(record), token, device_account_payload(record)
@@ -307,7 +339,11 @@ def upsert_oauth_user(
     avatar_url="",
     github_login="",
 ) -> tuple[dict, str]:
-    """Create or link a Google/GitHub identity and return (public user, token)."""
+    """Sign in a known provider identity or create a new, non-conflicting account.
+
+    Linking an identity requires a separate authenticated consent flow; matching
+    email addresses alone do not prove ownership of an existing local account.
+    """
     provider = str(provider or "").strip().lower()
     provider_id = str(provider_id or "").strip()
     if provider not in {"google", "github"} or not provider_id:
@@ -319,9 +355,10 @@ def upsert_oauth_user(
     id_field = "google_id" if provider == "google" else "github_id"
 
     def mutate(store):
-        record = _find_user(store, **{id_field: provider_id}) or _find_user(
-            store, email=email
-        )
+        record = _find_user(store, **{id_field: provider_id})
+        email_owner = _find_user(store, email=email)
+        if email_owner is not None and email_owner is not record:
+            raise UserAccountError("Auth OAuth Failed")
         if record is None:
             record = {
                 "id": _new_user_id(),
@@ -356,64 +393,74 @@ def upsert_oauth_user(
     return _with_store(mutate)
 
 
-def restore_device_account(payload) -> tuple[dict, str] | None:
-    """Re-create a server account from this device after a cloud restart."""
-    if not isinstance(payload, dict):
-        return None
-    user_id = str(payload.get("id") or "").strip()
-    email = normalize_email(payload.get("email"))
-    if not user_id or not email:
-        return None
-
-    def mutate(store):
-        record = _find_user(store, user_id=user_id) or _find_user(store, email=email)
-        if record is None:
-            record = {
-                "id": user_id,
-                "email": email,
-                "display_name": validate_display_name(
-                    payload.get("display_name"), email
-                ),
-                "avatar_url": str(payload.get("avatar_url") or "").strip(),
-                "google_id": str(payload.get("google_id") or "").strip(),
-                "github_id": str(payload.get("github_id") or "").strip(),
-                "github_login": str(payload.get("github_login") or "").strip(),
-                "password_salt": str(payload.get("password_salt") or ""),
-                "password_hash": str(payload.get("password_hash") or ""),
-                "created_at": str(payload.get("created_at") or _iso()),
-                "last_login_at": _iso(),
-                "keys": payload.get("keys") if isinstance(payload.get("keys"), dict) else {},
-            }
-            store["users"].append(record)
-        else:
-            if payload.get("password_hash") and not record.get("password_hash"):
-                record["password_hash"] = str(payload.get("password_hash") or "")
-                record["password_salt"] = str(payload.get("password_salt") or "")
-            for field in ("google_id", "github_id", "github_login", "avatar_url"):
-                incoming = str(payload.get(field) or "").strip()
-                if incoming and not record.get(field):
-                    record[field] = incoming
-        _touch(record)
-        token = _issue_token(store, record["id"])
-        return public_user(record), token, device_account_payload(record)
-
-    return _with_store(mutate)
+def restore_device_account(payload) -> None:
+    """Untrusted browser data cannot create accounts or grant sessions."""
+    return None
 
 
-def user_from_session(token: str) -> dict | None:
-    token = str(token or "").strip()
+def _session_record(store: dict, token: str) -> dict | None:
     if not token:
         return None
-    store = _read_store()
     try:
         claims = jwt.decode(token, store["secret"], algorithms=["HS256"])
     except jwt.PyJWTError:
         return None
     user_id = str(claims.get("uid") or "").strip()
     record = _find_user(store, user_id=user_id)
-    if record is None:
+    if record is None or not isinstance(claims.get("jti"), str):
         return None
-    return public_user(record)
+    sessions = record.get("sessions")
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    if not isinstance(sessions, dict) or digest not in sessions:
+        return None
+    return record
+
+
+def user_from_session(token: str) -> dict | None:
+    token = str(token or "").strip()
+    if not token:
+        return None
+    record = _session_record(_read_store(), token)
+    return public_user(record) if record else None
+
+
+def update_display_name(token: str, name: str) -> dict:
+    """Update only the profile belonging to this currently valid session."""
+    token = str(token or "").strip()
+    name = str(name or "").strip()
+    if not name or len(name) > NAME_MAX_LENGTH:
+        raise UserAccountError("Auth Invalid Name")
+
+    def mutate(store):
+        record = _session_record(store, token)
+        if not record:
+            raise UserAccountError("Auth Login Failed")
+        record["display_name"] = name
+        record["updated_at"] = _iso()
+        return public_user(record)
+
+    return _with_store(mutate)
+
+
+def revoke_session(token: str) -> bool:
+    """Revoke one session, leaving other devices signed in."""
+    token = str(token or "").strip()
+    if not token:
+        return False
+
+    def mutate(store):
+        try:
+            claims = jwt.decode(token, store["secret"], algorithms=["HS256"])
+        except jwt.PyJWTError:
+            return False
+        record = _find_user(store, user_id=claims.get("uid"))
+        sessions = record.get("sessions") if record else None
+        if not isinstance(sessions, dict):
+            return False
+        digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        return sessions.pop(digest, None) is not None
+
+    return _with_store(mutate)
 
 
 def get_user(user_id: str) -> dict | None:
@@ -431,14 +478,17 @@ def update_user_keys(user_id: str, keys: dict) -> None:
     if not isinstance(keys, dict):
         return
 
-    def mutate(store):
+    # The WebUI checks this on each rerun. Keep the read/compare/write under
+    # the same inter-process lock, but do not fsync and replace the account
+    # file when credentials are unchanged or the account is absent.
+    lock_path = str(accounts_file()) + ".lock"
+    with _lock, FileLock(lock_path, timeout=10):
+        store = _load_store_unlocked()
         record = _find_user(store, user_id=user_id)
         if record is None or record.get("keys") == keys:
-            return False
+            return
         record["keys"] = keys
-        return True
-
-    _with_store(mutate)
+        _save_store_unlocked(store)
 
 
 def get_device_account(user_id: str) -> dict | None:
@@ -494,7 +544,18 @@ def pop_oauth_pending(state) -> dict | None:
         if not isinstance(pending, dict) or state not in pending:
             return None
         item = pending.pop(state, None)
-        return item if isinstance(item, dict) else None
+        if not isinstance(item, dict):
+            return None
+        try:
+            created = datetime.fromisoformat(str(item.get("created_at") or ""))
+            if created.tzinfo is None:
+                return None
+            age = _utc_now() - created
+            if age < timedelta(0) or age > timedelta(minutes=20):
+                return None
+        except (ValueError, TypeError, OverflowError):
+            return None
+        return item
 
     return _with_store(mutate)
 

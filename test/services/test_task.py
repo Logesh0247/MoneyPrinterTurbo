@@ -1557,7 +1557,7 @@ class TestTaskService(unittest.TestCase):
                 self.assertTrue(failed_task["error"])
 
     def test_start_records_unexpected_pipeline_exception(self):
-        """未预期异常也必须结束任务，并向 API 暴露原始异常类型和信息。"""
+        """Unexpected failures retain their type without exposing provider messages."""
         params = VideoParams(video_subject="Coffee")
         state = MemoryState()
 
@@ -1577,7 +1577,7 @@ class TestTaskService(unittest.TestCase):
         self.assertEqual(failed_task["failed_stage"], "pipeline")
         self.assertEqual(
             failed_task["error"],
-            "RuntimeError: provider connection reset",
+            "Unexpected pipeline failure (RuntimeError); check server diagnostics.",
         )
 
     def test_start_generates_youtube_metadata_for_each_cross_post(self):

@@ -108,6 +108,11 @@ def test_video_key_override_and_endpoint_are_independent_of_llm(llm_provider):
         assert values["volcengine_seedance_api_key"] == "ark-key"
         app.text_input(key="jalapeno_video_api_key_input").set_value("").run()
         assert not app.exception
+        # An empty replay must not erase a remembered key; explicit deletion
+        # provides a safe way to return to the shared credential.
+        assert provider.get_api_key(values) == "video-only-key"
+        app.button(key="clear_jalapeno_video_key").click().run()
+        assert not app.exception
         assert provider.get_api_key(values) == "shared-key"
 
 
