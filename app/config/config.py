@@ -730,6 +730,12 @@ app["redis_host"] = os.getenv(
     os.getenv("REDIS_HOST", app.get("redis_host", "localhost")),
 )
 
+# Host environment variables fill empty API keys and model names so Render /
+# Docker users do not paste the same credentials into the WebUI on every visit.
+from app.config.env_settings import apply_environment_api_settings  # noqa: E402
+
+apply_environment_api_settings(app)
+
 ffmpeg_path = app.get("ffmpeg_path", "")
 if ffmpeg_path:
     # config.toml 同样允许 "~" / "${VAR}" 写法：先展开再做存在性判断，
